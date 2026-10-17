@@ -37,6 +37,8 @@ const DEVTOOLS_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(50);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
 const MIN_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
+/// [`QueryState::fixed_exit`] 里代表当前固定出口的线路名。
+const FIXED_EXIT: &str = "fixed";
 const DELIVERY_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const EMPTY_DELIVERY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_RESPONSE_BYTES: usize = 4 << 20;
@@ -1431,7 +1433,7 @@ struct QueryState {
     ///
     /// 541/403/429 发生后继续为同地区逐店发请求，不会提高成功率，只会把
     /// 一轮查询从十几秒拖到数分钟。这里只短路当前轮次；`begin_cycle` 会清空它，
-    /// 下一轮仍按用户设置的间隔复用同一会话探测，不是保护冷却或指数退避。
+    /// 跨轮次的冷却由 `routes`（轮换）或 `fixed_exit`（固定出口）负责。
     pickup_rejections: HashMap<&'static str, CyclePickupRejection>,
     /// 本轮已经被旧 fulfillment 送货接口拒绝的地区。
     ///
@@ -1449,6 +1451,12 @@ struct QueryState {
     /// Clash 模式下的控制接口；地址无效时保存错误原因。
     clash: Option<Result<ClashController, String>>,
     routes: RoutePool,
+    /// 跟随系统代理与指定节点模式下唯一出口的冷却记录，只用到 [`FIXED_EXIT`] 一条线路。
+    ///
+    /// 固定出口被拒后继续每轮探测换不来结果：实测同一 IP 约 30 次请求后进入
+    /// 541，此后每轮一次的探测全部被拒。冷却期间不发请求，到期探测一次，仍被拒
+    /// 就按 [`crate::route_pool::COOLDOWN_STEPS`] 升档。
+    fixed_exit: RoutePool,
     /// 本轮是否已从 Clash 读取节点列表。每轮重读一次，跟上用户在 Clash 里的改动。
     routes_loaded: bool,
     /// 本轮 Clash 控制接口的故障，同轮不再重复访问。
@@ -1568,9 +1576,6 @@ impl QueryState {
     }
 
     fn schedule_hint(&mut self, locales: &[String]) -> ScheduleHint {
-        if self.network.mode != NetworkMode::Clash {
-            return ScheduleHint::default();
-        }
         let now = Instant::now();
         let sites: BTreeSet<String> = locales
             .iter()
@@ -1579,7 +1584,13 @@ impl QueryState {
             .collect();
         let waits: Vec<Option<Duration>> = sites
             .iter()
-            .map(|site| self.routes.wait_for(site, now))
+            .map(|site| {
+                if self.rotating() {
+                    self.routes.wait_for(site, now)
+                } else {
+                    self.fixed_exit.remaining(FIXED_EXIT, site, now)
+                }
+            })
             .collect();
         let cooling = waits.iter().any(Option::is_some);
         // 只要还有一个站点能查，就按用户间隔继续；全部站点都没有可用节点时，
@@ -1642,6 +1653,8 @@ impl QueryState {
             self.routes = RoutePool::default();
             self.cooling_announced.clear();
         }
+        // 换了出口方式或指定节点，旧出口的冷却不再适用。
+        self.fixed_exit = RoutePool::default();
         self.clash = uses_clash.then(|| ClashController::new(&network.clash));
         self.network = network;
         self.routes_loaded = false;
@@ -1827,6 +1840,13 @@ impl QueryState {
     /// 记录当前节点被 Apple 拒绝，返回是否还能换节点立即重试。
     fn route_rejected(&mut self, region: &'static Region) -> bool {
         if !self.rotating() {
+            let site = region_site(region);
+            let cooldown = self.fixed_exit.block(FIXED_EXIT, &site, Instant::now());
+            eprintln!(
+                "{}在 {site} 被 Apple 拒绝，暂停查询 {} 分钟",
+                self.route_label(),
+                cooldown.as_secs().div_ceil(60)
+            );
             return false;
         }
         let Some(active) = self.routes.active().map(str::to_string) else {
@@ -1866,10 +1886,12 @@ impl QueryState {
     }
 
     fn route_succeeded(&mut self, region: &'static Region) {
+        let site = region_site(region);
         if !self.rotating() {
+            self.fixed_exit.succeed(FIXED_EXIT, &site);
+            self.cooling_announced.remove(&site);
             return;
         }
-        let site = region_site(region);
         if let Some(active) = self.routes.active().map(str::to_string) {
             self.routes.succeed(&active, &site);
         }
@@ -1888,6 +1910,17 @@ impl QueryState {
         // 每次重试都会让一个节点进入冷却或短暂跳过，节点数就是天然上限；
         // 再加一道保险，防止短暂跳过到期后在同一请求里无限循环。节点列表在
         // `prepare_route` 里才加载，上限必须在它之后按最新节点数计算。
+        if !self.rotating() {
+            let site = region_site(region);
+            if let Some(remaining) = self.fixed_exit.remaining(FIXED_EXIT, &site, Instant::now()) {
+                return Err(ApiError::CoolingDown {
+                    remaining_seconds: remaining.as_secs()
+                        + u64::from(remaining.subsec_nanos() > 0),
+                    detail: format!("{}被 Apple 拒绝，冷却结束后自动探测", self.route_label()),
+                    newly_started: self.cooling_announced.insert(site),
+                });
+            }
+        }
         let mut attempts = 0usize;
         loop {
             self.prepare_route(region).await?;
@@ -1939,6 +1972,7 @@ impl QueryState {
 
     fn retry_now(&mut self) {
         self.routes.release_waits(Instant::now());
+        self.fixed_exit.release_waits(Instant::now());
         self.route_failure = None;
         self.cooling_announced.clear();
         self.session_start_failure = None;
@@ -3800,7 +3834,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn 拒绝响应短路同轮同地区且下一轮恢复探测() {
+    async fn 拒绝响应短路同轮同地区并冷却固定出口() {
         for status in [429, 403, 541] {
             let (fetcher, peer) = cdp_fixture(json!({
                 "result": {"result": {"value": {"status": status, "body": "{}"}}}
@@ -3841,10 +3875,10 @@ mod tests {
                 1,
                 "HTTP {status} 后同轮同地区不得继续发请求"
             );
-            assert_eq!(
-                fetcher.schedule_hint(&["zh_CN".to_string()]).await,
-                ScheduleHint::default(),
-                "HTTP {status} 不得延长用户设定的轮询间隔"
+            let hint = fetcher.schedule_hint(&["zh_CN".to_string()]).await;
+            assert!(
+                hint.cooling && hint.delay > Duration::from_secs(4 * 60),
+                "HTTP {status} 后固定出口应冷却，下一轮等到冷却结束：{hint:?}"
             );
 
             fetcher.begin_cycle().await;
@@ -3881,7 +3915,12 @@ mod tests {
         assert!(fetcher.state.lock().await.session.is_some());
 
         fetcher.begin_cycle().await;
-        fetcher.state.lock().await.gate.last_sent = None;
+        {
+            // 模拟固定出口的冷却到期。
+            let mut state = fetcher.state.lock().await;
+            state.gate.last_sent = None;
+            state.fixed_exit.release_waits(Instant::now());
+        }
         let second = fetcher
             .pickup_message(region, "R390", &[test_target("MG6X4CH/A")], None)
             .await
@@ -3890,6 +3929,11 @@ mod tests {
         assert!(
             !second.parts["MG6X4CH/A"].availability.is_in_stock(),
             "第二轮的正常响应应能解析"
+        );
+        assert_eq!(
+            fetcher.schedule_hint(&["zh_CN".into()]).await,
+            ScheduleHint::default(),
+            "探测成功后清除固定出口的冷却档位"
         );
         assert!(fetcher.state.lock().await.session.is_some());
         assert!(
@@ -5007,7 +5051,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn 指定节点模式固定使用该节点且被拒后不自动切换() {
+    async fn 指定节点模式被拒后冷却且到期仍用同一节点探测() {
         let (mut clash, log) = fake_clash(&["香港01", "日本01"], "香港01").await;
         clash.pinned_node = "日本01".into();
         let (fetcher, _peer) = cdp_responses(vec![
@@ -5046,21 +5090,45 @@ mod tests {
             assert_eq!(state.routes.active(), Some("日本01"));
             assert!(
                 !state.routes.is_resting("日本01", Instant::now()),
-                "指定节点被拒后不冷却"
+                "指定节点的冷却记在固定出口上，不进入轮换线路池"
             );
         }
-        assert_eq!(
-            fetcher.schedule_hint(&["zh_CN".into()]).await,
-            ScheduleHint::default()
+        let hint = fetcher.schedule_hint(&["zh_CN".into()]).await;
+        assert!(
+            hint.cooling && hint.delay > Duration::from_secs(4 * 60),
+            "{hint:?}"
         );
 
-        // 下一轮仍用同一节点重试，不换节点。
+        // 冷却期内的下一轮不发请求。
         fetcher.begin_cycle().await;
         fetcher.state.lock().await.gate.last_sent = None;
+        let cooling = fetcher
+            .pickup_message(region, "R390", &[test_target("MG6X4CH/A")], None)
+            .await;
+        assert!(
+            matches!(
+                cooling,
+                Err(ApiError::CoolingDown {
+                    newly_started: true,
+                    ..
+                })
+            ),
+            "{cooling:?}"
+        );
+        assert_eq!(fetcher.cycle_stats().await.request_count, 0);
+
+        // 冷却到期后仍用同一节点探测，不换节点；再被拒就升到下一档。
+        fetcher.retry_now().await;
+        fetcher.begin_cycle().await;
         let second = fetcher
             .pickup_message(region, "R390", &[test_target("MG6X4CH/A")], None)
             .await;
         assert!(matches!(second, Err(ApiError::Blocked(_))));
+        let hint = fetcher.schedule_hint(&["zh_CN".into()]).await;
+        assert!(
+            hint.delay > Duration::from_secs(9 * 60),
+            "第二次被拒应升到 10 分钟：{hint:?}"
+        );
         assert_eq!(
             log.lock()
                 .await

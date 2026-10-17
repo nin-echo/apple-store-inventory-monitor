@@ -1,6 +1,6 @@
 //! 出口线路池：记录每条线路在每个 Apple 站点上的保护冷却，并挑选下一条线路。
 //!
-//! Apple 按出口 IP 计数，连续约 30 次请求后会以 HTTP 541 拒绝十几分钟。切换
+//! Apple 按出口 IP 计数，连续约 30 次请求后会以 HTTP 541 拒绝约半小时。切换
 //! 线路只有在「被拦的线路先休息」时才有意义；否则只会把每个 IP 依次烧完。
 //! 这里只做记账和选择，不发任何网络请求，也不认识 Clash —— 线路只是一个名字。
 //!
@@ -67,7 +67,8 @@ impl RoutePool {
         self.active = route.filter(|route| self.routes.contains(route));
     }
 
-    fn remaining(&self, route: &str, site: &str, now: Instant) -> Option<Duration> {
+    /// 线路在该站点剩余的冷却时间；未冷却时为 `None`。
+    pub fn remaining(&self, route: &str, site: &str, now: Instant) -> Option<Duration> {
         self.cooldowns
             .get(&(route.to_string(), site.to_string()))
             .map(|cooldown| cooldown.until.saturating_duration_since(now))

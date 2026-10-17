@@ -1464,6 +1464,8 @@ pub fn run() {
             // 而且因为发生在不可展开的回调中，进程会直接 abort。
             // 引擎任务交给 Tauri 自己的运行时去驱动。
             let watcher_config = WatcherConfig {
+                // 固定周期本身就是机器人特征；±20% 不改变平均请求速率。
+                jitter: 0.2,
                 delivery_region: settings.delivery_region.clone(),
                 ..WatcherConfig::default()
             };
