@@ -733,18 +733,28 @@ async fn 大陆送货地址只传给中国大陆查询() {
         state: "上海市".into(),
         city: "上海市".into(),
         district: "普陀区".into(),
+        postal_code: String::new(),
     });
     let (watcher, mut rx) = Watcher::spawn(fake.clone(), config);
     let mainland = target("R683", "CN/A");
     let mut japan = target("R718", "JP/A");
     japan.locale = "ja_JP".into();
-    watcher.set_targets(vec![mainland, japan]).await;
+    let mut us = target("R043", "US/A");
+    us.locale = "en_US".into();
+    us.pickup_location = Some("07078".into());
+    watcher.set_targets(vec![mainland, japan, us]).await;
     watcher.start().await;
     wait_cycle(&mut rx).await;
     watcher.stop().await;
 
     let seen = fake.seen_delivery_regions.lock().await;
-    assert_eq!(seen.len(), 2);
+    assert_eq!(seen.len(), 3);
+    assert!(seen.iter().any(|(locale, region)| {
+        locale == "en_US"
+            && region
+                .as_ref()
+                .is_some_and(|region| region.postal_code == "07078" && region.state.is_empty())
+    }));
     assert!(
         seen.iter()
             .any(|(locale, region)| locale == "zh_CN" && region.is_some())

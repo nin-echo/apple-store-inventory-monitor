@@ -1254,8 +1254,12 @@ fn delivery_query_pairs(parts: &[String], location: &DeliveryRegion) -> Vec<(Str
             .enumerate()
             .map(|(index, part)| (format!("parts.{index}"), part.clone())),
     );
-    // 大陆送货使用独立省市区。location 是取货地点搜索参数，送货接口可能
-    // 忽略它并返回 messageType=Ship 的发货时长，不能当作所选地址的送达日期。
+    // 美国站送货按邮编查询。大陆送货使用独立省市区：那里 location 只是取货
+    // 地点搜索参数，送货接口可能忽略它并返回 messageType=Ship 的发货时长。
+    if !location.postal_code.is_empty() {
+        pairs.push(("location".to_string(), location.postal_code.clone()));
+        return pairs;
+    }
     pairs.extend([
         ("state".to_string(), location.state.clone()),
         ("city".to_string(), location.city.clone()),
@@ -2484,7 +2488,10 @@ impl AppleChromiumFetcher {
                             }
                         }
                     }
-                    for target in targets.iter().filter(|target| target.kit_part.is_some()) {
+                    // Watch 表带送货只有大陆站的省市区接口。
+                    for target in targets.iter().filter(|target| {
+                        target.kit_part.is_some() && location.postal_code.is_empty()
+                    }) {
                         if guard.delivery_rejected_this_cycle(region) {
                             break;
                         }
@@ -3347,6 +3354,7 @@ mod tests {
             state: "上海".into(),
             city: "上海".into(),
             district: "黄浦区".into(),
+            postal_code: String::new(),
         };
         fetcher.begin_cycle().await;
 
@@ -3432,6 +3440,7 @@ mod tests {
             state: "四川".into(),
             city: "成都".into(),
             district: "锦江区".into(),
+            postal_code: String::new(),
         };
         let pickup_body = json!({
             "body": {
@@ -3493,6 +3502,7 @@ mod tests {
             state: "上海".into(),
             city: "上海".into(),
             district: "黄浦区".into(),
+            postal_code: String::new(),
         };
         state.cache_delivery(&target, &location, ProductDelivery::default());
         assert!(!state.needs_delivery(&target, &location));
@@ -3525,6 +3535,7 @@ mod tests {
         );
         let other = DeliveryRegion {
             district: "静安区".into(),
+            postal_code: String::new(),
             ..location.clone()
         };
         assert!(state.cached_delivery(&target, &other).is_none());
@@ -3576,6 +3587,7 @@ mod tests {
             state: "上海".into(),
             city: "上海".into(),
             district: "黄浦区".into(),
+            postal_code: String::new(),
         };
         let stores = ["R390", "R683", "R401", "R402", "R403"];
         for regular in [
@@ -3658,6 +3670,7 @@ mod tests {
             state: "上海".into(),
             city: "上海".into(),
             district: "黄浦区".into(),
+            postal_code: String::new(),
         };
         for (cycle, expected, message) in [
             (0, 2, "今天"),
@@ -3720,6 +3733,7 @@ mod tests {
             state: "上海".into(),
             city: "上海".into(),
             district: "黄浦区".into(),
+            postal_code: String::new(),
         };
         let mut target = test_target("watch");
         target.kit_part = Some("kit".into());
@@ -3779,6 +3793,7 @@ mod tests {
             state: "上海".into(),
             city: "上海".into(),
             district: "黄浦区".into(),
+            postal_code: String::new(),
         };
         for (store, parts, count) in [
             ("R390", vec!["A"], 2),
@@ -3829,6 +3844,7 @@ mod tests {
             state: "上海".into(),
             city: "上海".into(),
             district: "黄浦区".into(),
+            postal_code: String::new(),
         };
         let config = WatcherConfig {
             interval: Duration::from_millis(10),
@@ -3879,6 +3895,7 @@ mod tests {
             state: "上海".into(),
             city: "上海".into(),
             district: "黄浦区".into(),
+            postal_code: String::new(),
         };
         let mut target = test_target("watch");
         target.kit_part = Some("kit".into());
@@ -4172,6 +4189,7 @@ mod tests {
             state: "江苏".into(),
             city: "苏州".into(),
             district: "吴江区".into(),
+            postal_code: String::new(),
         };
         let pairs = delivery_query_pairs(&["MJYM4CH/A".into()], &destination);
 
@@ -4200,6 +4218,7 @@ mod tests {
             state: "北京".into(),
             city: "北京".into(),
             district: "石景山区".into(),
+            postal_code: String::new(),
         };
         let mut gate = RequestGate::default();
         for separate in [false, true] {
@@ -4254,6 +4273,7 @@ mod tests {
             state: "北京".into(),
             city: "北京".into(),
             district: "石景山区".into(),
+            postal_code: String::new(),
         };
         let delivery = session
             .fetch_product_delivery(region, &["MJYM4CH/A".into()], &destination, &mut gate)
@@ -4325,14 +4345,14 @@ mod tests {
     }
 
     #[test]
-    fn 中国送货使用购买页暖场而海外使用地区首页() {
+    fn 中国和美国送货使用购买页暖场而其他海外站使用地区首页() {
         for locale in [
             "zh_CN", "zh_HK", "zh_TW", "ja_JP", "en_SG", "en_AU", "en_MY", "en_US",
         ] {
             let region = region_by_locale(locale).expect("地区应当受支持");
             let url = region.session_page_url();
 
-            if locale == "zh_CN" {
+            if matches!(locale, "zh_CN" | "en_US") {
                 assert!(url.contains("/shop/buy-"));
             } else {
                 assert_eq!(url, format!("{}/", region.base_url));
@@ -4602,6 +4622,7 @@ mod tests {
             state: "上海".into(),
             city: "上海".into(),
             district: "黄浦区".into(),
+            postal_code: String::new(),
         };
         let result = fetcher
             .pickup(region, "R390", &[target.clone()], Some(&destination))
@@ -4631,6 +4652,7 @@ mod tests {
             state: "上海".into(),
             city: "上海".into(),
             district: "浦东新区".into(),
+            postal_code: String::new(),
         };
         let result = fetcher
             .pickup(region, "R683", &[target.clone()], Some(&destination))
@@ -4665,6 +4687,7 @@ mod tests {
             state: "江苏".into(),
             city: "苏州".into(),
             district: "吴江区".into(),
+            postal_code: String::new(),
         };
         let result = fetcher
             .pickup(region, "R678", &targets, Some(&destination))
@@ -5292,6 +5315,21 @@ mod tests {
         assert_eq!(
             fetcher.cycle_stats().await.route.as_deref(),
             Some("指定节点 日本01")
+        );
+    }
+
+    #[test]
+    fn 美国站送货按邮编查询且不带省市区() {
+        let location = DeliveryRegion {
+            postal_code: "07078".into(),
+            ..DeliveryRegion::default()
+        };
+        let pairs = delivery_query_pairs(&["MK1E4LL/A".into()], &location);
+        assert!(pairs.contains(&("location".into(), "07078".into())));
+        assert!(
+            pairs
+                .iter()
+                .all(|(key, _)| !matches!(key.as_str(), "state" | "city" | "district"))
         );
     }
 

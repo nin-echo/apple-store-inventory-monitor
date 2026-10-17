@@ -177,12 +177,15 @@ pub struct PickupDetails {
 
 /// Apple 送货查询使用的行政区。中国大陆接口只需要省、市、区，
 /// 不需要姓名、电话或街道地址。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryRegion {
     pub state: String,
     pub city: String,
     pub district: String,
+    /// 美国站按门店邮编查询送货，此时省、市、区留空；大陆站不使用。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub postal_code: String,
 }
 
 impl DeliveryRegion {
@@ -194,6 +197,7 @@ impl DeliveryRegion {
             state: state.to_string(),
             city: city.to_string(),
             district: district.to_string(),
+            postal_code: String::new(),
         })
     }
 }
@@ -279,7 +283,8 @@ impl Region {
     /// 自动化浏览器打开 `/shop/buy-*`，但地区首页与取货接口可以正常使用。
     /// 因此中国大陆保留购买页暖场，海外站点使用地区首页。
     pub fn session_page_url(&self) -> String {
-        if self.locale == "zh_CN" {
+        // 美国站同理：只在首页暖场时送货接口返回 541，购买页暖场后返回 200。
+        if matches!(self.locale, "zh_CN" | "en_US") {
             self.families.first().map_or_else(
                 || format!("{}/", self.base_url),
                 |family| self.buy_page_url(family),

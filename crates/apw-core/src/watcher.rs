@@ -371,10 +371,20 @@ async fn run_queries<F: Fetcher>(
         let client = client.clone();
         let sem = Arc::clone(&sem);
         // 省、市、区是中国大陆站专用参数。设置本身保留，方便用户切回大陆地区；
-        // 但绝不能带到香港、日本等地区的送货请求里。
-        let delivery_region = (group.locale == "zh_CN")
-            .then(|| delivery_region.clone())
-            .flatten();
+        // 但绝不能带到香港、日本等地区的送货请求里。美国站改用门店邮编，
+        // 它就是附近取货查询用的地点。
+        let delivery_region = match group.locale.as_str() {
+            "zh_CN" => delivery_region.clone(),
+            "en_US" => group
+                .targets
+                .iter()
+                .find_map(|target| target.pickup_location.clone())
+                .map(|postal_code| DeliveryRegion {
+                    postal_code,
+                    ..DeliveryRegion::default()
+                }),
+            _ => None,
+        };
         set.spawn(async move {
             // 拿不到许可只可能是信号量被关闭，这里不会发生；真发生了也只是
             // 少查一个门店，不该让整轮崩掉。
