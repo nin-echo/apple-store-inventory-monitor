@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { listClashNodes, saveSettings, selectClashNode, testClashRoute } from "@/lib/store";
 import type {
   ClashRouteCheck,
@@ -23,7 +24,10 @@ import type {
   RouteList,
 } from "@/lib/types";
 
-const MODE_HINTS: Record<NetworkMode, string> = {
+/** ExpressVPN 由开关控制，不出现在出口方式下拉框里。 */
+type SelectableMode = Exclude<NetworkMode, "express_vpn">;
+
+const MODE_HINTS: Record<SelectableMode, string> = {
   system: "跟随系统代理。开着 Clash 系统代理或 TUN 时，出口由 Clash 规则决定。",
   pinned: "经 Clash 专用端口固定使用下方指定的节点，不自动切换；选 DIRECT 即用本机网络，开着 TUN 也有效。",
   clash: "只走专用端口；节点被 Apple 拒绝时冷却并换下一个，不影响电脑本身的节点。",
@@ -33,7 +37,57 @@ const MODE_LABELS: Record<NetworkMode, string> = {
   system: "跟随系统代理",
   pinned: "指定节点",
   clash: "Clash 节点轮换",
+  express_vpn: "ExpressVPN 轮换",
 };
+
+const SELECTABLE_MODES: SelectableMode[] = ["system", "pinned", "clash"];
+
+/** 位置名本身含空格和连字符，用 | 分隔，与节点关键词的写法一致。 */
+const joinLocations = (locations: string[]) => locations.join(" | ");
+const splitLocations = (text: string) =>
+  text.split("|").map((location) => location.trim()).filter(Boolean);
+
+function ExpressVpnSection({ network }: { network: Network }) {
+  const saved = joinLocations(network.expressVpn.locations);
+  const [draft, setDraft] = useState(saved);
+  useEffect(() => setDraft(saved), [saved]);
+  const enabled = network.mode === "express_vpn";
+
+  return (
+    <div className="grid min-w-0 gap-2">
+      <div className="setting-row">
+        <Label htmlFor="express-vpn-enabled" className="text-sm font-normal">ExpressVPN 轮换</Label>
+        <Switch
+          id="express-vpn-enabled"
+          checked={enabled}
+          onCheckedChange={(on) => void saveSettings({ network: { ...network, mode: on ? "express_vpn" : "system" } })}
+        />
+      </div>
+      <p className="text-[11px] leading-4 break-words text-muted-foreground">
+        需要 macOS 上已登录的 ExpressVPN。被 Apple 拒绝时重连换 IP，并换一份全新的浏览器资料；
+        切换时整台电脑的网络会断开 2–3 秒。
+      </p>
+      {enabled ? (
+        <div className="field-group">
+          <Label htmlFor="express-vpn-locations" className="control-label">位置</Label>
+          <Input
+            id="express-vpn-locations"
+            className="control-surface select-text"
+            placeholder="USA - New Jersey - 1 | USA - Washington DC"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={() => {
+              const locations = splitLocations(draft);
+              if (joinLocations(locations) === saved) return;
+              void saveSettings({ network: { ...network, expressVpn: { locations } } });
+            }}
+          />
+          <FieldHint>与 ExpressVPN 界面显示的名字一致，用 | 分隔；同一位置重连也会换 IP，填一个即可</FieldHint>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 /** Clash Verge「全局扩展脚本」模板，与 README 中的脚本保持一致。 */
 const SCRIPT_TEMPLATE = "// Clash Verge「全局扩展脚本」：节点只供果到雷达的专用端口使用，不影响电脑本身的节点\nconst APW_PREFIX = \"APW·\";\nconst APW_GROUP = __GROUP__;\nconst APW_SUBSCRIPTIONS = {\n  机场1: \"机场订阅地址\",\n};\n\nfunction main(config, profileName) {\n  const providers = config[\"proxy-providers\"] || {};\n  const used = [];\n  for (const [label, url] of Object.entries(APW_SUBSCRIPTIONS)) {\n    if (!/^https?:\\/\\//.test(url)) continue;\n    const key = `apw-${label}`;\n    providers[key] = {\n      type: \"http\",\n      url,\n      interval: 86400,\n      path: `./providers/${key}.yaml`,\n      override: { \"additional-prefix\": `${APW_PREFIX}${label}|` },\n      \"health-check\": { enable: false },\n    };\n    used.push(key);\n  }\n  config[\"proxy-providers\"] = providers;\n\n  // 原有策略组若自动收录全部节点（include-all / include-all-providers），排除专用节点\n  const guard = `^${APW_PREFIX}`;\n  const groups = (config[\"proxy-groups\"] || []).filter((g) => g.name !== APW_GROUP);\n  for (const group of groups) {\n    if (group[\"include-all\"] || group[\"include-all-providers\"]) {\n      const old = group[\"exclude-filter\"];\n      if (old && old.includes(guard)) continue;\n      group[\"exclude-filter\"] = old ? `(?:${old})|${guard}` : guard;\n    }\n  }\n  groups.push({ name: APW_GROUP, type: \"select\", proxies: [\"DIRECT\"], use: used });\n  config[\"proxy-groups\"] = groups;\n\n  const listeners = (config.listeners || []).filter((l) => l.name !== \"apple-store-monitor\");\n  listeners.push({ name: \"apple-store-monitor\", type: \"mixed\", port: __PORT__, listen: \"127.0.0.1\", proxy: APW_GROUP });\n  config.listeners = listeners;\n  return config;\n}";
@@ -396,31 +450,35 @@ export function NetworkSettings({
       subtitle={route ? `当前：${route}` : "Apple 查询使用的出口 IP"}
       summary={route ?? MODE_LABELS[network.mode]}
     >
-      <div className="field-group">
-        <Label htmlFor="network-mode" className="control-label">出口方式</Label>
-        <Select
-          value={network.mode}
-          onValueChange={(mode) => {
-            setCheck(null);
-            void saveSettings({ network: { ...network, mode: mode as NetworkMode } });
-          }}
-        >
-          <SelectTrigger id="network-mode" className="control-surface w-full" aria-label="出口方式">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {(Object.keys(MODE_LABELS) as NetworkMode[]).map((mode) => (
-              <SelectItem key={mode} value={mode}>{MODE_LABELS[mode]}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-[11px] leading-4 break-words text-muted-foreground">
-          {MODE_HINTS[network.mode]}
-          {running ? " 修改后会在下一次查询时重启查询浏览器。" : ""}
-        </p>
-      </div>
+      <ExpressVpnSection network={network} />
 
-      {network.mode !== "system" ? (
+      {network.mode === "express_vpn" ? null : (
+        <div className="mt-3 field-group">
+          <Label htmlFor="network-mode" className="control-label">出口方式</Label>
+          <Select
+            value={network.mode}
+            onValueChange={(mode) => {
+              setCheck(null);
+              void saveSettings({ network: { ...network, mode: mode as NetworkMode } });
+            }}
+          >
+            <SelectTrigger id="network-mode" className="control-surface w-full" aria-label="出口方式">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SELECTABLE_MODES.map((mode) => (
+                <SelectItem key={mode} value={mode}>{MODE_LABELS[mode]}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-[11px] leading-4 break-words text-muted-foreground">
+            {MODE_HINTS[network.mode]}
+            {running ? " 修改后会在下一次查询时重启查询浏览器。" : ""}
+          </p>
+        </div>
+      )}
+
+      {network.mode === "pinned" || network.mode === "clash" ? (
         <div className="mt-3 grid min-w-0 gap-3">
           <div className="flex items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
             <p className="text-[11px] leading-4 text-muted-foreground">

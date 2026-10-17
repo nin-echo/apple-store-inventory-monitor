@@ -16,7 +16,8 @@ use std::os::unix::fs::PermissionsExt;
 
 use apw_core::config::{
     CheckoutPayment, CheckoutSettings, ClashSettings, ConfigError, DEFAULT_INTERVAL_SECONDS,
-    MAX_SETTINGS_BYTES, NetworkMode, NetworkSettings, OpenOnHit, Settings, SettingsStore,
+    ExpressVpnSettings, MAX_SETTINGS_BYTES, NetworkMode, NetworkSettings, OpenOnHit, Settings,
+    SettingsStore,
 };
 use apw_core::model::Target;
 
@@ -109,6 +110,9 @@ fn 样例设置() -> Settings {
                 proxy_port: 7899,
                 node_filter: "香港|日本".into(),
                 pinned_node: "DIRECT".into(),
+            },
+            express_vpn: ExpressVpnSettings {
+                locations: vec!["USA - New Jersey - 1".into()],
             },
         },
         checkout: CheckoutSettings {
@@ -609,7 +613,8 @@ fn 设置的线上格式是小驼峰() {
                 "proxyPort": 7899,
                 "nodeFilter": "香港|日本",
                 "pinnedNode": "DIRECT"
-            }
+            },
+            "expressVpn": {"locations": ["USA - New Jersey - 1"]}
         }))
     );
 }
@@ -701,6 +706,14 @@ fn 线路设置规范化去掉空白与控制地址结尾斜杠() {
                 node_filter: " 香港|日本 ".into(),
                 pinned_node: "  ".into(),
             },
+            express_vpn: ExpressVpnSettings {
+                locations: vec![
+                    " USA - New Jersey - 1 ".into(),
+                    "".into(),
+                    "USA - New Jersey - 1".into(),
+                    "USA - Washington DC".into(),
+                ],
+            },
         },
         ..Settings::default()
     };
@@ -711,6 +724,11 @@ fn 线路设置规范化去掉空白与控制地址结尾斜杠() {
     assert_eq!(clash.group, "果到雷达");
     assert_eq!(clash.node_filter, "香港|日本");
     assert_eq!(clash.pinned_node, "DIRECT", "空的指定节点回到 DIRECT");
+    assert_eq!(
+        settings.network.express_vpn.locations,
+        ["USA - New Jersey - 1", "USA - Washington DC"],
+        "ExpressVPN 位置去掉空白、空项与相邻重复"
+    );
 }
 
 #[test]

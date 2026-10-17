@@ -44,6 +44,12 @@ const EMPTY_DELIVERY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_RESPONSE_BYTES: usize = 4 << 20;
 const MAX_EXCEPTION_SUMMARY_CHARS: usize = 160;
 const CHROMIUM_PROFILE_DIR: &str = "chromium-profile-v1";
+/// ExpressVPN 轮换专用的浏览器资料目录，每次换 IP 都清空重建。
+const EXPRESS_VPN_PROFILE_DIR: &str = "chromium-profile-xvpn";
+/// 一轮里最多连续换几次 ExpressVPN 出口。全都被拒时多半不是单个 IP 的问题，
+/// 改为冷却，避免每轮都让整台电脑的网络断几次。
+const MAX_VPN_ROTATIONS_PER_CYCLE: u32 = 3;
+const EXPRESS_VPN_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_ESTABLISHED_MARKER: &str = ".apple-session-established";
 const PAGE_FETCH_FAILURE_MARKER: &str = "__APW_PAGE_FETCH_FAILED__:";
 const PAGE_FETCH_FAILURE_PREFIX: &str = "Apple 页面请求失败：";
@@ -275,11 +281,69 @@ fn save_startup_diagnostic(profile: &Path, browser: &Path, mode: &str, result: &
 /// 浏览器走专用端口，不改变系统代理。
 fn chromium_network_args(network: &NetworkSettings) -> Vec<String> {
     match network.mode {
-        NetworkMode::System => Vec::new(),
+        NetworkMode::System | NetworkMode::ExpressVpn => Vec::new(),
         NetworkMode::Pinned | NetworkMode::Clash => vec![format!(
             "--proxy-server=http://127.0.0.1:{}",
             network.clash.proxy_port
         )],
+    }
+}
+
+/// 经 AppleScript 控制本机已登录的 ExpressVPN App，返回脚本输出。
+async fn express_vpn(command: String) -> Result<String, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("ExpressVPN 轮换目前只支持 macOS".into());
+    }
+    tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                &format!(r#"tell application "ExpressVPN" to {command}"#),
+            ])
+            .output()
+            .map_err(|e| format!("无法调用 osascript：{e}"))?;
+        let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_string();
+        if output.status.success() {
+            Ok(text(&output.stdout))
+        } else {
+            Err(text(&output.stderr))
+        }
+    })
+    .await
+    .map_err(|e| format!("osascript 任务异常：{e}"))?
+}
+
+/// 断开后重连到 `location`，等到 ExpressVPN 报告已连接。
+///
+/// 已连接时直接 connect 会报 `Invalid state`，必须先断开。同一位置重连也会分到
+/// 新 IP，所以只配一个位置也能轮换。
+async fn reconnect_express_vpn(location: &str) -> Result<(), ApiError> {
+    let fail = |detail: String| ApiError::Transport(format!("ExpressVPN 切换失败：{detail}"));
+    let state = || express_vpn("get state".into());
+    // 本来就没连上时 disconnect 会报错，可以忽略；真正的问题会在下面等待时暴露。
+    let _ = express_vpn("disconnect".into()).await;
+    for _ in 0..20 {
+        if state().await.map_err(fail)? != "connected" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let quoted = location.replace('\\', "\\\\").replace('"', "\\\"");
+    express_vpn(format!(r#"connect "{quoted}""#))
+        .await
+        .map_err(fail)?;
+    let deadline = Instant::now() + EXPRESS_VPN_CONNECT_TIMEOUT;
+    loop {
+        let current = state().await.map_err(fail)?;
+        if current == "connected" {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(fail(format!(
+                "等待连接「{location}」超时（当前状态 {current}），请确认位置名与 ExpressVPN 界面一致"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -1457,6 +1521,10 @@ struct QueryState {
     /// 541，此后每轮一次的探测全部被拒。冷却期间不发请求，到期探测一次，仍被拒
     /// 就按 [`crate::route_pool::COOLDOWN_STEPS`] 升档。
     fixed_exit: RoutePool,
+    /// ExpressVPN 当前连接的位置；`None` 表示本次启动还没切换过。
+    vpn_location: Option<String>,
+    /// 下一次切换使用的位置序号，按配置顺序循环。
+    vpn_next: usize,
     /// 本轮是否已从 Clash 读取节点列表。每轮重读一次，跟上用户在 Clash 里的改动。
     routes_loaded: bool,
     /// 本轮 Clash 控制接口的故障，同轮不再重复访问。
@@ -1607,6 +1675,15 @@ impl QueryState {
         match self.network.mode {
             NetworkMode::System => None,
             NetworkMode::Pinned => Some(format!("指定节点 {}", self.network.clash.pinned_node)),
+            NetworkMode::ExpressVpn => Some(if self.route_switches > 0 {
+                format!(
+                    "{}（本轮切换 {} 次）",
+                    self.route_label(),
+                    self.route_switches
+                )
+            } else {
+                self.route_label()
+            }),
             NetworkMode::Clash => Some(if let Some(failure) = &self.route_failure {
                 failure.clone()
             } else {
@@ -1625,6 +1702,10 @@ impl QueryState {
         match self.network.mode {
             NetworkMode::System => "系统代理".into(),
             NetworkMode::Pinned => format!("指定节点 {}", self.network.clash.pinned_node),
+            NetworkMode::ExpressVpn => format!(
+                "ExpressVPN {}",
+                self.vpn_location.as_deref().unwrap_or("尚未切换")
+            ),
             NetworkMode::Clash => {
                 format!("Clash 节点 {}", self.routes.active().unwrap_or("尚未选定"))
             }
@@ -1632,12 +1713,15 @@ impl QueryState {
     }
 
     fn set_network(&mut self, network: NetworkSettings) {
-        let uses_clash = matches!(network.mode, NetworkMode::Pinned | NetworkMode::Clash);
+        let uses_clash = network.mode.uses_clash_port();
         if self.network == network && self.clash.is_some() == uses_clash {
             return;
         }
-        if chromium_network_args(&self.network) != chromium_network_args(&network) {
-            // 代理参数只能在启动 Chromium 时指定，换线路方式必须重启浏览器。
+        if chromium_network_args(&self.network) != chromium_network_args(&network)
+            || self.network.mode != network.mode
+        {
+            // 代理参数只能在启动 Chromium 时指定，换线路方式必须重启浏览器；
+            // 进出 ExpressVPN 轮换还要换用不同的浏览器资料。
             self.session = None;
             self.session_start_failure = None;
         }
@@ -1839,6 +1923,27 @@ impl QueryState {
 
     /// 记录当前节点被 Apple 拒绝，返回是否还能换节点立即重试。
     fn route_rejected(&mut self, region: &'static Region) -> bool {
+        if self.network.mode == NetworkMode::ExpressVpn {
+            // 只换 IP、沿用旧 Cookie 会立刻再被拒，所以丢掉会话：下一次查询会
+            // 先重连 VPN，再用全新的浏览器资料启动。
+            self.session = None;
+            self.consecutive_rejections = self.consecutive_rejections.saturating_add(1);
+            if self.consecutive_rejections >= MAX_VPN_ROTATIONS_PER_CYCLE {
+                let site = region_site(region);
+                let cooldown = self.fixed_exit.block(FIXED_EXIT, &site, Instant::now());
+                eprintln!(
+                    "ExpressVPN 连续 {} 个出口在 {site} 被 Apple 拒绝，暂停查询 {} 分钟",
+                    self.consecutive_rejections,
+                    cooldown.as_secs().div_ceil(60)
+                );
+            } else {
+                eprintln!(
+                    "{}被 Apple 拒绝，下一次查询换 IP 与浏览器资料",
+                    self.route_label()
+                );
+            }
+            return false;
+        }
         if !self.rotating() {
             let site = region_site(region);
             let cooldown = self.fixed_exit.block(FIXED_EXIT, &site, Instant::now());
@@ -1877,6 +1982,9 @@ impl QueryState {
 
     /// Clash 模式下本轮是否还能换到另一个节点。
     fn can_switch_route(&self, region: &'static Region) -> bool {
+        if self.network.mode == NetworkMode::ExpressVpn {
+            return self.consecutive_rejections < MAX_VPN_ROTATIONS_PER_CYCLE;
+        }
         self.rotating()
             && self.consecutive_rejections < MAX_CONSECUTIVE_REJECTIONS
             && self
@@ -1890,6 +1998,7 @@ impl QueryState {
         if !self.rotating() {
             self.fixed_exit.succeed(FIXED_EXIT, &site);
             self.cooling_announced.remove(&site);
+            self.consecutive_rejections = 0;
             return;
         }
         if let Some(active) = self.routes.active().map(str::to_string) {
@@ -1910,17 +2019,6 @@ impl QueryState {
         // 每次重试都会让一个节点进入冷却或短暂跳过，节点数就是天然上限；
         // 再加一道保险，防止短暂跳过到期后在同一请求里无限循环。节点列表在
         // `prepare_route` 里才加载，上限必须在它之后按最新节点数计算。
-        if !self.rotating() {
-            let site = region_site(region);
-            if let Some(remaining) = self.fixed_exit.remaining(FIXED_EXIT, &site, Instant::now()) {
-                return Err(ApiError::CoolingDown {
-                    remaining_seconds: remaining.as_secs()
-                        + u64::from(remaining.subsec_nanos() > 0),
-                    detail: format!("{}被 Apple 拒绝，冷却结束后自动探测", self.route_label()),
-                    newly_started: self.cooling_announced.insert(site),
-                });
-            }
-        }
         let mut attempts = 0usize;
         loop {
             self.prepare_route(region).await?;
@@ -1981,6 +2079,51 @@ impl QueryState {
         self.pickup_rejections.clear();
         self.delivery_rejections.clear();
         self.delivery_attempts.clear();
+    }
+
+    /// 固定出口（含 ExpressVPN 连续换出口都失败后）冷却中时，返回不发请求的冷却错误。
+    fn fixed_exit_cooling(&mut self, region: &'static Region) -> Option<ApiError> {
+        if self.rotating() {
+            return None;
+        }
+        let site = region_site(region);
+        let remaining = self
+            .fixed_exit
+            .remaining(FIXED_EXIT, &site, Instant::now())?;
+        Some(ApiError::CoolingDown {
+            remaining_seconds: remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0),
+            detail: format!("{}被 Apple 拒绝，冷却结束后自动探测", self.route_label()),
+            newly_started: self.cooling_announced.insert(site),
+        })
+    }
+
+    /// 启动查询浏览器要用的资料目录。ExpressVPN 轮换下每次启动都先换 IP，
+    /// 再清空专用资料目录，保证新 IP 配的是一份 Apple 没见过的 Cookie。
+    async fn session_profile_dir(&mut self, default: &Path) -> Result<PathBuf, ApiError> {
+        if self.network.mode != NetworkMode::ExpressVpn {
+            return Ok(default.to_path_buf());
+        }
+        let locations = &self.network.express_vpn.locations;
+        if locations.is_empty() {
+            return Err(ApiError::Transport(
+                "请在「查询线路」里填写至少一个 ExpressVPN 位置".into(),
+            ));
+        }
+        let location = locations[self.vpn_next % locations.len()].clone();
+        self.vpn_next = self.vpn_next.wrapping_add(1);
+        reconnect_express_vpn(&location).await?;
+        let profile = app_profile_dir(EXPRESS_VPN_PROFILE_DIR);
+        if let Err(error) = std::fs::remove_dir_all(&profile)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(ApiError::Transport(format!(
+                "无法清空 ExpressVPN 浏览器资料：{error}"
+            )));
+        }
+        eprintln!("ExpressVPN 已连接 {location}，查询浏览器改用全新资料");
+        self.vpn_location = Some(location);
+        self.route_switches = self.route_switches.saturating_add(1);
+        Ok(profile)
     }
 
     fn pickup_rejection(&self, region: &'static Region) -> Option<ApiError> {
@@ -2127,6 +2270,9 @@ impl AppleChromiumFetcher {
         if let Some(detail) = guard.session_start_failure.clone() {
             return Err(ApiError::BrowserUnavailable(detail));
         }
+        if let Some(error) = guard.fixed_exit_cooling(region) {
+            return Err(error);
+        }
         let nearby_unavailable = cache_key
             .as_ref()
             .is_some_and(|cache_key| guard.unavailable_nearby.contains(cache_key));
@@ -2150,9 +2296,13 @@ impl AppleChromiumFetcher {
         } else {
             if guard.session.is_none() {
                 let network_args = chromium_network_args(&guard.network);
-                match ChromiumSession::start_with_args(self.profile_dir.clone(), &network_args)
-                    .await
-                {
+                let started = match guard.session_profile_dir(&self.profile_dir).await {
+                    Ok(profile_dir) => {
+                        ChromiumSession::start_with_args(profile_dir, &network_args).await
+                    }
+                    Err(error) => Err(error),
+                };
+                match started {
                     Ok(session) => guard.session = Some(session),
                     Err(error) => {
                         let detail = match &error {
@@ -4783,6 +4933,7 @@ mod tests {
         state.network = NetworkSettings {
             mode: NetworkMode::Clash,
             clash,
+            ..NetworkSettings::default()
         };
     }
 
@@ -5067,6 +5218,7 @@ mod tests {
             state.network = NetworkSettings {
                 mode: NetworkMode::Pinned,
                 clash,
+                ..NetworkSettings::default()
             };
         }
         let region = region_by_locale("zh_CN").unwrap();
@@ -5141,6 +5293,96 @@ mod tests {
             fetcher.cycle_stats().await.route.as_deref(),
             Some("指定节点 日本01")
         );
+    }
+
+    #[tokio::test]
+    async fn expressvpn被拒后丢弃会话且同轮继续_连续三次才冷却() {
+        let (fetcher, _peer) = cdp_responses(vec![http_response(541), http_response(541)]).await;
+        {
+            let mut state = fetcher.state.lock().await;
+            state.network = NetworkSettings {
+                mode: NetworkMode::ExpressVpn,
+                ..NetworkSettings::default()
+            };
+        }
+        let region = region_by_locale("zh_CN").unwrap();
+
+        fetcher.begin_cycle().await;
+        let first = fetcher
+            .pickup_message(region, "R390", &[test_target("MG6X4CH/A")], None)
+            .await;
+        assert!(matches!(first, Err(ApiError::Blocked(_))));
+        {
+            let state = fetcher.state.lock().await;
+            assert!(state.session.is_none(), "换 IP 必须同时丢掉旧 Cookie 会话");
+            assert!(
+                state.pickup_rejection(region).is_none(),
+                "还能换出口时同轮其他门店继续查询"
+            );
+        }
+        assert_eq!(
+            fetcher.schedule_hint(&["zh_CN".into()]).await,
+            ScheduleHint::default()
+        );
+
+        // 模拟本轮前两次换出口都已被拒：第三次被拒后改为冷却，不再继续换。
+        let (second_fetcher, _peer) = cdp_responses(vec![http_response(541)]).await;
+        {
+            let mut state = second_fetcher.state.lock().await;
+            state.network = NetworkSettings {
+                mode: NetworkMode::ExpressVpn,
+                ..NetworkSettings::default()
+            };
+            state.consecutive_rejections = MAX_VPN_ROTATIONS_PER_CYCLE - 1;
+        }
+        let third = second_fetcher
+            .pickup_message(region, "R390", &[test_target("MG6X4CH/A")], None)
+            .await;
+        assert!(matches!(third, Err(ApiError::Blocked(_))));
+        assert!(
+            second_fetcher
+                .state
+                .lock()
+                .await
+                .pickup_rejection(region)
+                .is_some()
+        );
+        let hint = second_fetcher.schedule_hint(&["zh_CN".into()]).await;
+        assert!(
+            hint.cooling && hint.delay > Duration::from_secs(4 * 60),
+            "{hint:?}"
+        );
+        let cooling = second_fetcher
+            .pickup_message(region, "R683", &[test_target("MG6X4CH/A")], None)
+            .await;
+        assert!(matches!(
+            cooling,
+            Err(ApiError::Blocked(_) | ApiError::CoolingDown { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn expressvpn没填位置时不启动浏览器并说明原因() {
+        let fetcher = AppleChromiumFetcher {
+            state: Arc::new(Mutex::new(QueryState {
+                network: NetworkSettings {
+                    mode: NetworkMode::ExpressVpn,
+                    ..NetworkSettings::default()
+                },
+                ..QueryState::default()
+            })),
+            profile_dir: std::env::temp_dir(),
+        };
+        let result = fetcher
+            .pickup_message(
+                region_by_locale("zh_CN").unwrap(),
+                "R390",
+                &[test_target("MG6X4CH/A")],
+                None,
+            )
+            .await;
+        let error = result.expect_err("没有位置不能查询").to_string();
+        assert!(error.contains("ExpressVPN 位置"), "{error}");
     }
 
     #[test]

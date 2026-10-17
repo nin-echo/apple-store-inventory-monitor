@@ -514,10 +514,10 @@ struct CatalogRefresh {
 /// 目录刷新使用的 HTTP 客户端：与库存查询走同一个出口。
 ///
 /// 「指定节点」和「Clash 节点轮换」下经 Clash 专用端口，出口就是专用策略组
-/// 当前选中的节点；跟随系统代理时沿用宿主长期持有的客户端。
+/// 当前选中的节点；跟随系统代理和 ExpressVPN 轮换时沿用宿主长期持有的客户端。
 fn catalog_http(state: &AppState) -> reqwest::Client {
     let network = state.settings_snapshot().network;
-    if network.mode == apw_core::config::NetworkMode::System {
+    if !network.mode.uses_clash_port() {
         return state.http.clone();
     }
     reqwest::Proxy::all(format!("http://127.0.0.1:{}", network.clash.proxy_port))
@@ -559,7 +559,7 @@ async fn refresh_catalog(
     let http = catalog_http(state);
     // 查询线路的当前节点可能根本连不上某个站点（例如家宽直连访问 www.apple.com
     // 被断开）。经线路完全失败时改用系统网络再试一次，刷新目录不该被节点拖累。
-    let via_route = state.settings_snapshot().network.mode != apw_core::config::NetworkMode::System;
+    let via_route = state.settings_snapshot().network.mode.uses_clash_port();
     let mut errors = Vec::new();
 
     let mut stores_result = state.catalog.refresh_stores(region, &http).await;
@@ -688,6 +688,7 @@ async fn test_clash_route(clash: ClashSettings) -> Result<ClashRouteCheck, Strin
     let mut network = apw_core::config::NetworkSettings {
         mode: apw_core::config::NetworkMode::Clash,
         clash,
+        ..apw_core::config::NetworkSettings::default()
     };
     let mut settings = Settings {
         network: network.clone(),

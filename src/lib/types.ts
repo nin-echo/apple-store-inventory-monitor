@@ -124,7 +124,7 @@ export interface Store {
 /** 检测到有货时自动打开的页面，与 Rust 侧 `OpenOnHit` 一一对应。 */
 export type OpenOnHit = "none" | "bag" | "education_bag" | "product";
 
-export type NetworkMode = "system" | "pinned" | "clash";
+export type NetworkMode = "system" | "pinned" | "clash" | "express_vpn";
 
 export interface ClashSettings {
   controller: string;
@@ -137,9 +137,15 @@ export interface ClashSettings {
   pinnedNode: string;
 }
 
+export interface ExpressVpnSettings {
+  /** 轮流连接的位置名，须与 ExpressVPN 界面显示的完全一致。 */
+  locations: string[];
+}
+
 export interface NetworkSettings {
   mode: NetworkMode;
   clash: ClashSettings;
+  expressVpn: ExpressVpnSettings;
 }
 
 /** 自动结账使用的付款方式，与 Rust 侧 `CheckoutPayment` 一一对应。 */

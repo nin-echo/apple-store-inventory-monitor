@@ -185,6 +185,17 @@ pub enum NetworkMode {
     Pinned,
     /// 通过 Clash / mihomo 的专用端口查询，被拦时经控制接口切换节点。
     Clash,
+    /// 走本机已登录的 ExpressVPN（macOS），被拦时重连换 IP 并换一份全新的浏览器资料。
+    ///
+    /// Apple 同时按 Cookie 会话和 IP 计数：只换 IP、沿用旧 Cookie 会立刻再被拒。
+    ExpressVpn,
+}
+
+impl NetworkMode {
+    /// 查询浏览器是否经 Clash 专用端口出去。
+    pub fn uses_clash_port(self) -> bool {
+        matches!(self, Self::Pinned | Self::Clash)
+    }
 }
 
 /// Clash / mihomo 线路设置。
@@ -222,12 +233,23 @@ impl Default for ClashSettings {
     }
 }
 
+/// ExpressVPN 轮换设置。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExpressVpnSettings {
+    /// 轮流连接的位置名，须与 ExpressVPN 界面显示的完全一致，例如 `USA - New Jersey - 1`。
+    ///
+    /// 同一位置重连也会分到新 IP，所以只填一个也能轮换。
+    pub locations: Vec<String>,
+}
+
 /// 查询网络设置。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NetworkSettings {
     pub mode: NetworkMode,
     pub clash: ClashSettings,
+    pub express_vpn: ExpressVpnSettings,
 }
 
 impl NetworkSettings {
@@ -245,6 +267,13 @@ impl NetworkSettings {
         if clash.pinned_node.is_empty() {
             clash.pinned_node = "DIRECT".into();
         }
+        let locations = &mut self.express_vpn.locations;
+        *locations = locations
+            .iter()
+            .map(|location| location.trim().to_string())
+            .filter(|location| !location.is_empty())
+            .collect();
+        locations.dedup();
     }
 }
 

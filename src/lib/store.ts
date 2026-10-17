@@ -101,6 +101,7 @@ const DEFAULT_SETTINGS: Settings = {
       nodeFilter: "",
       pinnedNode: "DIRECT",
     },
+    expressVpn: { locations: [] },
   },
   checkout: {
     enabled: false,
