@@ -1463,6 +1463,29 @@ struct QueryState {
 }
 
 impl QueryState {
+    /// 本轮其他地点的附近查询可能已经带回了这家店。
+    ///
+    /// 美国站按邮编查询，同一都会区的门店邮编各不相同，按地点合并不起来；但一次
+    /// 附近查询会返回周边约 12 家店。只要某份响应里有这家店、且要查的型号全部
+    /// 在内，就直接复用，不再为它单独发请求。
+    fn nearby_response_covering(
+        &self,
+        locale: &str,
+        store_number: &str,
+        parts: &[String],
+    ) -> Option<String> {
+        self.pickup_cache
+            .iter()
+            .filter(|((cached_locale, cached_parts, _), _)| {
+                *cached_locale == locale && parts.iter().all(|part| cached_parts.contains(part))
+            })
+            .find(|(_, body)| {
+                parse_pickup_message(body.as_bytes(), store_number)
+                    .is_ok_and(|found| parts.iter().all(|part| found.parts.contains_key(part)))
+            })
+            .map(|(_, body)| body.clone())
+    }
+
     fn begin_cycle(&mut self) {
         self.session_start_failure = None;
         self.pickup_cache.clear();
@@ -2076,7 +2099,12 @@ impl AppleChromiumFetcher {
         let cached_body = cache_key
             .as_ref()
             .and_then(|key| guard.pickup_cache.get(key))
-            .cloned();
+            .cloned()
+            .or_else(|| {
+                can_reuse_nearby
+                    .then(|| guard.nearby_response_covering(region.locale, store_number, &parts))
+                    .flatten()
+            });
         let (mut payload, mut used_nearby_response) = if let Some(body) = cached_body {
             // 缓存只保存取货接口原文。命中后仍要继续执行下方的配送合并，不能
             // 提前返回，否则同城第二家门店会把预计送货显示成“未返回”。
@@ -2905,6 +2933,60 @@ mod tests {
                 }
             );
         }
+        assert!(!peer.await.unwrap(), "有效会话不应被提前关闭");
+    }
+
+    #[tokio::test]
+    async fn 不同邮编的门店复用已含自身的附近响应() {
+        let (fetcher, peer, requests) = cdp_recorded_responses(vec![
+            multi_pickup_response(&[
+                ("R035", &[("A", "available"), ("B", "unavailable")]),
+                ("R284", &[("A", "unavailable"), ("B", "available")]),
+            ]),
+            multi_pickup_response(&[("R077", &[("A", "available"), ("B", "available")])]),
+        ])
+        .await;
+        fetcher.state.lock().await.session.as_mut().unwrap().locale = Some("en_US");
+        let region = region_by_locale("en_US").unwrap();
+        let us_target = |store: &str, zip: &str, part: &str| {
+            let mut target = test_target(part);
+            target.locale = "en_US".into();
+            target.store_number = store.into();
+            target.pickup_location = Some(zip.into());
+            target
+        };
+
+        fetcher.begin_cycle().await;
+        let mut results = Vec::new();
+        for (store, zip) in [("R035", "60611"), ("R284", "60601"), ("R077", "97205")] {
+            fetcher.state.lock().await.gate.last_sent = None;
+            let targets = [us_target(store, zip, "A"), us_target(store, zip, "B")];
+            results.push(
+                fetcher
+                    .pickup_message(region, store, &targets, None)
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        // 芝加哥第二家店从第一家店的附近响应里取数，库存不串店；
+        // 波特兰不在那份响应里，仍按自己的邮编发请求。
+        assert!(results[0].parts["A"].availability.is_in_stock());
+        assert!(!results[1].parts["A"].availability.is_in_stock());
+        assert!(results[1].parts["B"].availability.is_in_stock());
+        assert_eq!(results[2].store_number, "R077");
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(sent_pairs(&requests[1]).contains(&("location".into(), "97205".into())));
+        assert_eq!(
+            fetcher.cycle_stats().await,
+            CycleStats {
+                request_count: 2,
+                reused_response_count: 1,
+                route: None,
+            }
+        );
+        drop(requests);
         assert!(!peer.await.unwrap(), "有效会话不应被提前关闭");
     }
 
