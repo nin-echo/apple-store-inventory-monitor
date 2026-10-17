@@ -38,9 +38,9 @@
   "plugins": {
     "updater": {
       "active": true,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE2MjUwQTJGRjYyNzY2NjIKUldSaVppZjJMd29scHZ3WlVTbGJ4YnIzRlBNTVVVQmdod0wzUDVpcjVRQmErZUNwY01ob1Z0R20K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM3Rjc1RDE1RTEwNzc5ODgKUldTSWVRZmhGVjMzTnh0SFB2Zm1BbGdralUvNmJoVXhwTDV1eTRydFR4UmlnT3AxYkkrdDg0ZEEK",
       "endpoints": [
-        "https://github.com/suversal/apple-store-inventory-monitor/releases/latest/download/latest.json"
+        "https://github.com/nin-echo/apple-store-inventory-monitor/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
