@@ -1038,11 +1038,17 @@ async fn dispatch_notification(
     channels.notify(&notification).await
 }
 
-fn in_stock_notification_body(target: &Target) -> String {
+fn in_stock_notification_body(target: &Target, pickup_quote: Option<&str>) -> String {
     let mut body = format!(
         "门店：{}\n型号：{}（{}）",
         target.store_title, target.product_name, target.part_number
     );
+    if let Some(quote) = pickup_quote
+        .map(str::trim)
+        .filter(|quote| !quote.is_empty())
+    {
+        body.push_str(&format!("\n取货：{quote}"));
+    }
     if let Some(companion) = target
         .companion_part
         .as_deref()
@@ -1242,7 +1248,13 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             let has_product_bark = settings.product_bark_urls.contains_key(&target.part_number);
             let mut notification = Notification::new(
                 format!("有货了：{}", target.product_name),
-                in_stock_notification_body(target),
+                in_stock_notification_body(
+                    target,
+                    state
+                        .pickup_details
+                        .as_ref()
+                        .and_then(|details| details.pickup_quote.as_deref()),
+                ),
             );
             // Bark 点开后在 Apple Store App 里打开购物袋，不跟随电脑端的「到货后打开」。
             if let Some(region) = region_by_locale(&target.locale) {
@@ -1629,10 +1641,11 @@ mod tests {
             kit_part: Some("Z0YQ".into()),
             pickup_location: None,
         };
-        let body = in_stock_notification_body(&target);
+        let body = in_stock_notification_body(&target, Some("今天 在 Apple 香港广场"));
         assert!(body.starts_with(
-            "门店：上海-香港广场\n型号：Apple Watch Ultra 4 49 毫米 黑色（MJCX4CH/B）"
+            "门店：上海-香港广场\n型号：Apple Watch Ultra 4 49 毫米 黑色（MJCX4CH/B）\n取货：今天 在 Apple 香港广场"
         ));
+        assert!(!in_stock_notification_body(&target, Some(" ")).contains("取货"));
         assert!(body.contains("Watch 送货搭配表带 MKDY4FE/A"));
     }
 
