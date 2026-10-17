@@ -27,6 +27,7 @@ const CASES: &[(&str, &str, &str)] = &[
     ("en_SG", "R669", "MG6L4X/A"),
     ("en_AU", "R440", "MG6L4X/A"),
     ("en_MY", "R742", "MG6L4X/A"),
+    ("en_US", "R035", "MG484LL/A"),
 ];
 
 fn client() -> AppleClient {
@@ -35,7 +36,7 @@ fn client() -> AppleClient {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn 七个地区的接口都还能用() {
+async fn 八个地区的接口都还能用() {
     let client = client();
 
     for (locale, store, part) in CASES {

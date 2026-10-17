@@ -47,9 +47,9 @@ const SELECTION: &str = r#"{
 // ---- 内嵌数据 ----
 
 #[test]
-fn 七个地区都能从内嵌数据读出商品与门店() {
+fn 八个地区都能从内嵌数据读出商品与门店() {
     let catalog = Catalog::new();
-    assert_eq!(REGIONS.len(), 7);
+    assert_eq!(REGIONS.len(), 8);
 
     for region in REGIONS {
         let products = catalog
@@ -209,6 +209,13 @@ fn 门店展示名按地区使用适合用户搜索的层级() {
         .store_by_number("en_AU", "R466")
         .expect("澳大利亚应当有 R466");
     assert_eq!(au.title, "Queensland-Brisbane");
+
+    // 美国站附近门店查询只认邮编或「城市, 州缩写」，单写城市会被拒绝。
+    let us = catalog
+        .store_by_number("en_US", "R035")
+        .expect("美国应当有 R035");
+    assert_eq!(us.title, "Illinois-Michigan Avenue");
+    assert_eq!(us.pickup_location("en_US").as_deref(), Some("60611"));
 }
 
 #[test]

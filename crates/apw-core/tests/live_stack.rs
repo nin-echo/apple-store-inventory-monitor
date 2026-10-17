@@ -260,7 +260,7 @@ async fn 能从官网抓到最新型号() {
 /// 门店列表页是门店在线刷新的唯一来源。它的结构一旦变化，门店就只能停留在
 /// 缓存或内嵌快照上，这里要第一时间发现。
 #[tokio::test(flavor = "multi_thread")]
-async fn 能从官网门店列表页刷新七个地区的门店() {
+async fn 能从官网门店列表页刷新八个地区的门店() {
     let catalog = Catalog::new();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))

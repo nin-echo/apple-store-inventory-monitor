@@ -24,6 +24,7 @@ fn 商品链接保留地区前缀和完整料号() {
         ("en_SG", "https://www.apple.com/sg"),
         ("en_AU", "https://www.apple.com/au"),
         ("en_MY", "https://www.apple.com/my"),
+        ("en_US", "https://www.apple.com"),
     ] {
         assert_eq!(
             target(locale, "MG6W4CH/A").purchase_url(None),

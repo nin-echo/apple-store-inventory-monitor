@@ -81,6 +81,7 @@ const EMBEDDED_PRODUCTS: &[(&str, &str)] = &[
     ("en_SG", include_str!("../data/products_en_SG.json")),
     ("en_AU", include_str!("../data/products_en_AU.json")),
     ("en_MY", include_str!("../data/products_en_MY.json")),
+    ("en_US", include_str!("../data/products_en_US.json")),
 ];
 
 /// 内嵌的离线门店快照。所有地区都在这一个文件里。
@@ -1217,7 +1218,7 @@ mod tests {
 
     #[test]
     fn 内嵌快照覆盖兜底购买页且没有重复页() {
-        // 各地区可有额外新品快照，不要求七个站点在同一天上线同一批产品。
+        // 各地区可有额外新品快照，不要求各站点在同一天上线同一批产品。
         let catalog = Catalog::new();
         for region in REGIONS {
             let pages = catalog

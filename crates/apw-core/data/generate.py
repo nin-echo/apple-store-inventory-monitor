@@ -42,6 +42,7 @@ REGIONS = {
     "en_SG": ("https://www.apple.com/sg", "en-US,en;q=0.9"),
     "en_AU": ("https://www.apple.com/au", "en-US,en;q=0.9"),
     "en_MY": ("https://www.apple.com/my", "en-US,en;q=0.9"),
+    "en_US": ("https://www.apple.com", "en-US,en;q=0.9"),
 }
 
 # 与 crates/apw-core/src/model.rs 的 DEFAULT_FAMILIES 保持一致。

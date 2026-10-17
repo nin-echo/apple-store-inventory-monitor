@@ -312,6 +312,9 @@ impl Region {
     pub fn education_bag_url(&self) -> String {
         if self.locale == "zh_CN" {
             format!("{}/cn-edu/shop/bag", self.base_url)
+        } else if self.locale == "en_US" {
+            // 美国站没有地区路径前缀，教育商店挂在 /us-edu 下。
+            format!("{}/us-edu/shop/bag", self.base_url)
         } else {
             format!("{}-edu/shop/bag", self.base_url)
         }
@@ -481,6 +484,12 @@ pub const REGIONS: &[Region] = &[
         base_url: "https://www.apple.com/my",
         families: DEFAULT_FAMILIES,
     },
+    Region {
+        title: "United States",
+        locale: "en_US",
+        base_url: "https://www.apple.com",
+        families: DEFAULT_FAMILIES,
+    },
 ];
 
 /// 按 locale 查找地区。
@@ -553,7 +562,8 @@ impl Store {
         match locale {
             // 大陆站只写城市会被拒绝，必须使用「省 市」。
             "zh_CN" => (!state.is_empty() && !city.is_empty()).then(|| format!("{state} {city}")),
-            "ja_JP" => pick(postal).or_else(|| pick(city)),
+            // 美国站只写城市会被拒绝（同名城市太多），邮编可以直接定位。
+            "ja_JP" | "en_US" => pick(postal).or_else(|| pick(city)),
             _ => pick(city).or_else(|| pick(postal)),
         }
     }
@@ -678,7 +688,7 @@ mod tests {
 
     #[test]
     fn 地区表里每个站点都能拼出接口地址() {
-        assert_eq!(REGIONS.len(), 7);
+        assert_eq!(REGIONS.len(), 8);
         let cn = region_by_locale("zh_CN").expect("地区表里应当有中国大陆");
         assert_eq!(
             cn.pickup_message_url(),
@@ -717,6 +727,7 @@ mod tests {
             ("en_SG", "https://www.apple.com/sg-edu/shop/bag"),
             ("en_AU", "https://www.apple.com/au-edu/shop/bag"),
             ("en_MY", "https://www.apple.com/my-edu/shop/bag"),
+            ("en_US", "https://www.apple.com/us-edu/shop/bag"),
         ];
         for (locale, expected) in cases {
             let region = region_by_locale(locale).expect("地区应当受支持");

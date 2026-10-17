@@ -4051,7 +4051,7 @@ mod tests {
     #[test]
     fn 中国送货使用购买页暖场而海外使用地区首页() {
         for locale in [
-            "zh_CN", "zh_HK", "zh_TW", "ja_JP", "en_SG", "en_AU", "en_MY",
+            "zh_CN", "zh_HK", "zh_TW", "ja_JP", "en_SG", "en_AU", "en_MY", "en_US",
         ] {
             let region = region_by_locale(locale).expect("地区应当受支持");
             let url = region.session_page_url();
