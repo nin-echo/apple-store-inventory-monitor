@@ -1038,11 +1038,19 @@ async fn dispatch_notification(
     channels.notify(&notification).await
 }
 
-fn in_stock_notification_body(target: &Target, pickup_quote: Option<&str>) -> String {
-    let mut body = format!(
-        "门店：{}\n型号：{}（{}）",
-        target.store_title, target.product_name, target.part_number
-    );
+fn in_stock_notification_body(
+    target: &Target,
+    postal_code: Option<&str>,
+    pickup_quote: Option<&str>,
+) -> String {
+    let mut body = format!("门店：{}", target.store_title);
+    if let Some(postal_code) = postal_code.map(str::trim).filter(|code| !code.is_empty()) {
+        body.push_str(&format!(", {postal_code}"));
+    }
+    body.push_str(&format!(
+        "\n型号：{}（{}）",
+        target.product_name, target.part_number
+    ));
     if let Some(quote) = pickup_quote
         .map(str::trim)
         .filter(|quote| !quote.is_empty())
@@ -1246,10 +1254,19 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             let destination_url = target_open_url(&app, target, settings.open_on_hit);
             let bark_url = settings.bark_url_for(target).to_owned();
             let has_product_bark = settings.product_bark_urls.contains_key(&target.part_number);
+            let postal_code = app
+                .try_state::<AppState>()
+                .and_then(|state| {
+                    state
+                        .catalog
+                        .store_by_number(&target.locale, &target.store_number)
+                })
+                .map(|store| store.postal_code);
             let mut notification = Notification::new(
                 format!("有货了：{}", target.product_name),
                 in_stock_notification_body(
                     target,
+                    postal_code.as_deref(),
                     state
                         .pickup_details
                         .as_ref()
@@ -1641,11 +1658,13 @@ mod tests {
             kit_part: Some("Z0YQ".into()),
             pickup_location: None,
         };
-        let body = in_stock_notification_body(&target, Some("今天 在 Apple 香港广场"));
+        let body =
+            in_stock_notification_body(&target, Some("200021"), Some("今天 在 Apple 香港广场"));
         assert!(body.starts_with(
-            "门店：上海-香港广场\n型号：Apple Watch Ultra 4 49 毫米 黑色（MJCX4CH/B）\n取货：今天 在 Apple 香港广场"
+            "门店：上海-香港广场, 200021\n型号：Apple Watch Ultra 4 49 毫米 黑色（MJCX4CH/B）\n取货：今天 在 Apple 香港广场"
         ));
-        assert!(!in_stock_notification_body(&target, Some(" ")).contains("取货"));
+        let bare = in_stock_notification_body(&target, None, Some(" "));
+        assert!(bare.starts_with("门店：上海-香港广场\n") && !bare.contains("取货"));
         assert!(body.contains("Watch 送货搭配表带 MKDY4FE/A"));
     }
 
