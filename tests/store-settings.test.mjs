@@ -23,7 +23,7 @@ registerHooks({
 });
 
 const defaults = {
-  locale: "zh_CN", targets: [], intervalSeconds: 30,
+  locale: "zh_CN", targets: [], activeList: "默认列表", savedLists: {}, intervalSeconds: 30,
   deliveryRegion: null,
   barkUrl: "https://example.invalid/old", soundEnabled: true, openOnHit: "bag", stopOnHit: false,
   productBarkUrls: {},
@@ -178,4 +178,28 @@ test("a product-specific Bark URL can be set and cleared", async () => {
 
   assert.equal(await ctx.store.setProductBarkUrl(target, ""), true);
   assert.deepEqual(ctx.persisted().productBarkUrls, {});
+});
+
+test("switching lists keeps every list and deleting drops only the current one", async () => {
+  const ctx = await setup();
+  const target = (partNumber) => ({
+    locale: "en_US", storeNumber: "R043", storeTitle: "Test",
+    partNumber, productName: partNumber,
+  });
+  await ctx.store.setTargets([target("A/A")]);
+
+  await ctx.store.switchList("备用");
+  assert.equal(ctx.persisted().activeList, "备用");
+  assert.deepEqual(ctx.persisted().targets, []);
+  assert.deepEqual(ctx.persisted().savedLists, { 默认列表: [target("A/A")] });
+
+  await ctx.store.setTargets([target("B/A")]);
+  await ctx.store.switchList("默认列表");
+  assert.deepEqual(ctx.persisted().targets, [target("A/A")]);
+  assert.deepEqual(ctx.persisted().savedLists, { 备用: [target("B/A")] });
+
+  await ctx.store.switchList("备用", true);
+  assert.equal(ctx.persisted().activeList, "备用");
+  assert.deepEqual(ctx.persisted().targets, [target("B/A")]);
+  assert.deepEqual(ctx.persisted().savedLists, {});
 });

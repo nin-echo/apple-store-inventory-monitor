@@ -84,6 +84,8 @@ export interface UiState {
 const DEFAULT_SETTINGS: Settings = {
   locale: "zh_CN",
   targets: [],
+  activeList: "默认列表",
+  savedLists: {},
   deliveryRegion: null,
   intervalSeconds: 30,
   barkUrl: "",
@@ -399,7 +401,10 @@ function describeCatalogRefresh(result: CatalogRefresh): string {
 async function writeTargets(targets: Target[]): Promise<boolean> {
   try {
     const rows = await invoke<TargetState[]>("set_targets", { targets });
-    const activeParts = new Set(targets.map((target) => target.partNumber));
+    // 与 Rust 侧一致：其他列表里的型号也保留专属 Bark。
+    const activeParts = new Set(
+      [...targets, ...Object.values(state.settings.savedLists).flat()].map((target) => target.partNumber),
+    );
     const productBarkUrls = Object.fromEntries(
       Object.entries(state.settings.productBarkUrls).filter(([partNumber]) =>
         activeParts.has(partNumber),
@@ -415,6 +420,33 @@ async function writeTargets(targets: Target[]): Promise<boolean> {
 
 export function setTargets(targets: Target[]): Promise<boolean> {
   return enqueueSettingsWrite(() => writeTargets(targets));
+}
+
+/**
+ * 切换到另一个监控列表；名称不存在时新建一个空列表。
+ *
+ * 当前列表存回 savedLists、目标列表换进 targets，在同一次保存里落盘，
+ * 不会出现写到一半、某个列表丢失的情况。deleteCurrent 时当前列表不再保存。
+ */
+export function switchList(next: string, deleteCurrent = false): Promise<boolean> {
+  return enqueueSettingsWrite(async () => {
+    const { activeList, targets, savedLists } = state.settings;
+    const lists = { ...savedLists };
+    if (!deleteCurrent) lists[activeList] = targets;
+    const nextTargets = lists[next] ?? [];
+    delete lists[next];
+    try {
+      const saved = await invoke<Settings>("save_settings", {
+        settings: { ...state.settings, activeList: next, targets: nextTargets, savedLists: lists },
+      });
+      const rows = await invoke<TargetState[]>("get_snapshot");
+      update({ settings: saved, rows });
+      return true;
+    } catch (err) {
+      pushLog(`切换监控列表失败：${String(err)}`);
+      return false;
+    }
+  });
 }
 
 /**

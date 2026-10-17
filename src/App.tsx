@@ -32,6 +32,7 @@ import { MultiCombobox } from "@/components/MultiCombobox";
 import { CollapsiblePanel } from "@/components/CollapsiblePanel";
 import { CheckoutSettings } from "@/components/CheckoutSettings";
 import { NetworkSettings } from "@/components/NetworkSettings";
+import { ListSwitcher } from "@/components/ListSwitcher";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -993,9 +994,12 @@ export default function App() {
                       <p className="mt-0.5 text-xs text-muted-foreground">新款优先 · 取货与送货状态实时更新</p>
                     </div>
                   </div>
-                  <span className="rounded-full border border-border/60 bg-background/40 px-2.5 py-1 text-xs tabular-nums text-muted-foreground">
-                    {ui.rows.length} 项
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <ListSwitcher settings={ui.settings} />
+                    <span className="rounded-full border border-border/60 bg-background/40 px-2.5 py-1 text-xs tabular-nums text-muted-foreground">
+                      {ui.rows.length} 项
+                    </span>
+                  </div>
                 </div>
 
                 {removeError ? (

@@ -410,8 +410,12 @@ impl CheckoutSettings {
 pub struct Settings {
     /// 上次选择的地区 locale。
     pub locale: String,
-    /// 监控目标列表。
+    /// 当前监控列表的目标。引擎只监控这一份。
     pub targets: Vec<Target>,
+    /// 当前监控列表的名称，`targets` 就是它的内容。
+    pub active_list: String,
+    /// 其他不在监控的列表，按名称保存；切换时与 `targets` 互换。
+    pub saved_lists: BTreeMap<String, Vec<Target>>,
     /// 统一的送货目的地区。为空时保留 Apple 按门店地区给出的估算。
     pub delivery_region: Option<DeliveryRegion>,
     /// 每轮查询之间的间隔秒数。
@@ -434,6 +438,9 @@ pub struct Settings {
     pub checkout: CheckoutSettings,
 }
 
+/// 首次使用或旧版设置没有列表名时，当前列表使用的名称。
+pub const DEFAULT_LIST_NAME: &str = "默认列表";
+
 /// 内置地区表里的第一个 locale，作为兜底取值。
 ///
 /// 不写 `REGIONS[0]`：那是个会 panic 的下标访问，而这是库代码。
@@ -446,6 +453,8 @@ impl Default for Settings {
         Self {
             locale: fallback_locale().to_string(),
             targets: Vec::new(),
+            active_list: DEFAULT_LIST_NAME.to_string(),
+            saved_lists: BTreeMap::new(),
             delivery_region: None,
             interval_seconds: DEFAULT_INTERVAL_SECONDS,
             bark_url: String::new(),
@@ -468,6 +477,9 @@ impl Settings {
     pub fn normalize(&mut self) {
         if region_by_locale(&self.locale).is_none() {
             self.locale = fallback_locale().to_string();
+        }
+        if self.active_list.trim().is_empty() {
+            self.active_list = DEFAULT_LIST_NAME.to_string();
         }
 
         self.delivery_region = self
@@ -509,11 +521,12 @@ impl Settings {
         }
         self.targets = kept;
 
-        // 型号专属 Bark 只保留仍在监控的型号。地址在保存时统一去掉首尾空白，
-        // 空值等价于「沿用默认 Bark」，不必在配置文件里留一条无效覆盖。
+        // 型号专属 Bark 只保留仍在某个列表里的型号，切换列表时不会丢。地址在保存时
+        // 统一去掉首尾空白，空值等价于「沿用默认 Bark」，不必在配置文件里留一条无效覆盖。
         let active_parts: HashSet<String> = self
             .targets
             .iter()
+            .chain(self.saved_lists.values().flatten())
             .map(|target| target.part_number.clone())
             .collect();
         self.product_bark_urls.retain(|part_number, bark_url| {
@@ -975,6 +988,8 @@ impl LegacySettings {
                 .into_iter()
                 .map(LegacyTarget::into_target)
                 .collect(),
+            active_list: fallback.active_list,
+            saved_lists: fallback.saved_lists,
             delivery_region: None,
             interval_seconds: self
                 .interval_seconds

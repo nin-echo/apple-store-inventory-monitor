@@ -92,6 +92,10 @@ fn 样例设置() -> Settings {
     Settings {
         locale: "zh_CN".into(),
         targets: vec![目标("R683", "MG724CH/A"), 目标("R448", "MG0A4CH/A")],
+        active_list: "主力".into(),
+        saved_lists: [("备用".into(), vec![目标("R390", "MG6X4CH/A")])]
+            .into_iter()
+            .collect(),
         delivery_region: None,
         interval_seconds: 45,
         bark_url: "https://api.day.app/xxxx".into(),
@@ -595,13 +599,15 @@ fn 设置的线上格式是小驼峰() {
         "stopOnHit",
         "network",
         "checkout",
+        "activeList",
+        "savedLists",
     ] {
         assert!(obj.contains_key(key), "缺少字段 {key}：{value}");
     }
     assert!(!obj.contains_key("interval_seconds"), "不该有蛇形字段");
     assert_eq!(obj.get("openOnHit"), Some(&serde_json::json!("product")));
     assert!(!obj.contains_key("openBagOnHit"));
-    assert_eq!(obj.len(), 11);
+    assert_eq!(obj.len(), 13);
     assert_eq!(
         obj.get("network"),
         Some(&serde_json::json!({
@@ -644,6 +650,28 @@ fn 型号专属_bark_覆盖默认地址并清理失效配置() {
         settings.bark_url_for(&target),
         "https://api.day.app/default"
     );
+}
+
+#[test]
+fn 切换列表不会清掉其他列表里型号的专属_bark() {
+    let mut settings = Settings {
+        targets: vec![目标("R683", "MG724CH/A")],
+        active_list: "  ".into(),
+        saved_lists: [("备用".into(), vec![目标("R390", "SAVED/A")])]
+            .into_iter()
+            .collect(),
+        product_bark_urls: [
+            ("SAVED/A".into(), "https://api.day.app/friend".into()),
+            ("GONE/A".into(), "https://api.day.app/stale".into()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Settings::default()
+    };
+    settings.normalize();
+    assert!(settings.product_bark_urls.contains_key("SAVED/A"));
+    assert!(!settings.product_bark_urls.contains_key("GONE/A"));
+    assert_eq!(settings.active_list, "默认列表", "空列表名回到默认名称");
 }
 
 #[test]

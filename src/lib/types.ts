@@ -214,7 +214,12 @@ export interface RouteList {
 
 export interface Settings {
   locale: string;
+  /** 当前监控列表的目标；引擎只监控这一份。 */
   targets: Target[];
+  /** 当前监控列表的名称。 */
+  activeList: string;
+  /** 其他不在监控的列表，切换时与 targets 互换。 */
+  savedLists: Record<string, Target[]>;
   deliveryRegion: DeliveryRegion | null;
   intervalSeconds: number;
   /** 按商品零件号覆盖默认 Bark；同一型号在不同门店共用。 */
