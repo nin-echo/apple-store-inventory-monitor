@@ -990,8 +990,15 @@ async fn test_notify(app: AppHandle) -> Result<(), String> {
         ));
     }
 
+    if let Some(url) = settings
+        .targets
+        .first()
+        .and_then(|target| target_purchase_url(&app, target))
+        .or_else(|| jump_url.clone())
+    {
+        notification = notification.with_url(url);
+    }
     if let Some(url) = jump_url {
-        notification = notification.with_url(url.clone());
         use tauri_plugin_opener::OpenerExt;
         app.opener()
             .open_url(url, None::<&str>)
@@ -1232,8 +1239,11 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             let bark_url = settings.bark_url_for(target).to_owned();
             let has_product_bark = settings.product_bark_urls.contains_key(&target.part_number);
             let mut notification = Notification::new("有货了", in_stock_notification_body(target));
-            if let Some(url) = &destination_url {
-                notification = notification.with_url(url.clone());
+            // Bark 先按通用链接打开，没有 App 认领才退回 Safari。Apple Store App
+            // 认领各地区的商品页与购买页，但不认领购物袋，所以 Bark 固定用商品页，
+            // 不跟随电脑端的「到货后打开」。
+            if let Some(url) = target_purchase_url(&app, target) {
+                notification = notification.with_url(url);
             }
 
             let mut opened_destination = None;
