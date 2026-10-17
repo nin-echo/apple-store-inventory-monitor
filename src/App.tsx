@@ -77,8 +77,6 @@ import {
   loadDeliveryLocalities,
   loadWatchBandChoices,
   loadWatchBandSizes,
-  openAuthorPage,
-  openProjectPage,
   openReleasePage,
   openTargetProduct,
   refreshProducts,
@@ -132,22 +130,6 @@ function compactProductName(name: string): string {
 
 function watchBandDescription(companionPart?: string): string | undefined {
   return companionPart ? `送货查询使用目录默认表带 ${companionPart}` : undefined;
-}
-
-function GithubBrandIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path fillRule="evenodd" d="M12 2C6.477 2 2 6.589 2 12.253c0 4.53 2.865 8.374 6.839 9.731.5.094.682-.222.682-.494 0-.244-.009-.888-.014-1.744-2.782.62-3.369-1.374-3.369-1.374-.455-1.184-1.11-1.499-1.11-1.499-.908-.636.069-.623.069-.623 1.004.073 1.532 1.057 1.532 1.057.892 1.568 2.341 1.115 2.91.853.091-.663.349-1.115.635-1.371-2.221-.259-4.555-1.14-4.555-5.067 0-1.119.389-2.034 1.029-2.751-.103-.26-.446-1.302.098-2.713 0 0 .84-.276 2.75 1.051A9.33 9.33 0 0 1 12 7.992a9.31 9.31 0 0 1 2.504.346c1.909-1.327 2.748-1.051 2.748-1.051.545 1.411.202 2.453.1 2.713.64.717 1.027 1.632 1.027 2.751 0 3.937-2.337 4.805-4.565 5.059.359.317.679.944.679 1.903 0 1.374-.012 2.482-.012 2.819 0 .275.18.593.688.493C19.14 20.625 22 16.783 22 12.253 22 6.589 17.523 2 12 2Z" clipRule="evenodd" />
-    </svg>
-  );
-}
-
-function XBrandIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.45-6.231Zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77Z" />
-    </svg>
-  );
 }
 
 const TONE_CLASS: Record<StatusTone, string> = {
@@ -217,7 +199,7 @@ function DeliveryBadge({ pickupDetails, lastCheckedMs }: { pickupDetails?: Picku
     <Tooltip>
       <TooltipTrigger asChild>
         <span
-          className={`inline-grid min-w-24 max-w-48 cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-center gap-x-1.5 rounded-lg border px-2 py-1.5 ${DELIVERY_CLASS[delivery.tone]}`}
+          className={`inline-grid min-w-0 max-w-full cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-center gap-x-1.5 rounded-lg border px-2 py-1.5 ${DELIVERY_CLASS[delivery.tone]}`}
           aria-label={`预计送货：${delivery.detail}；${delivery.timing}`}
         >
           <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />
@@ -744,41 +726,6 @@ export default function App() {
               </div>
             </div>
 
-            <div className="hidden min-w-0 flex-1 items-center justify-center gap-2 min-[860px]:flex">
-              <span className="truncate text-sm text-muted-foreground">
-                本软件已开源，欢迎下载最新版体验
-              </span>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    className="rounded-lg"
-                    aria-label="在 GitHub 查看开源项目并下载最新版"
-                    onClick={() => void openProjectPage()}
-                  >
-                    <GithubBrandIcon />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>GitHub 项目与最新版下载</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="rounded-lg px-2 text-sm text-muted-foreground hover:text-foreground"
-                    aria-label="在 X 关注 @suversal，获取更多信息"
-                    onClick={() => void openAuthorPage()}
-                  >
-                    <XBrandIcon />
-                    @suversal
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>关注我获取更多信息</TooltipContent>
-              </Tooltip>
-            </div>
-
             <div className="flex shrink-0 items-center gap-2.5">
               <div className="status-pill" role="status" aria-live="polite">
                 <span
@@ -910,7 +857,7 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="grid grid-cols-2 items-start gap-3 lg:grid-cols-[0.9fr_0.9fr_1.3fr_2fr]">
+                <div className="grid grid-cols-2 items-start gap-3 xl:grid-cols-[0.9fr_0.9fr_1.3fr_2fr]">
                   <div className="field-group">
                     <Label className="control-label">
                       <MapPin className="size-3.5" aria-hidden="true" /> 地区
@@ -1062,9 +1009,9 @@ export default function App() {
                   <Table className="min-w-[1104px] table-fixed">
                     <colgroup>
                       <col className="w-36" />
-                      <col className="w-44" />
+                      <col className="w-64" />
                       <col className="w-[22rem]" />
-                      <col className="w-48" />
+                      <col className="w-28" />
                       <col className="w-24" />
                       <col className="w-24" />
                       <col className="w-12" />
@@ -1072,9 +1019,9 @@ export default function App() {
                     <TableHeader className="sticky top-0 z-10 bg-card/95">
                       <TableRow className="hover:bg-transparent">
                         <TableHead className="w-36 px-4 text-xs text-muted-foreground">取货状态</TableHead>
-                        <TableHead className="w-44 px-4 text-xs text-muted-foreground">门店</TableHead>
+                        <TableHead className="w-64 px-4 text-xs text-muted-foreground">门店</TableHead>
                         <TableHead className="px-4 text-xs text-muted-foreground">型号</TableHead>
-                        <TableHead className="w-48 px-3 text-xs text-muted-foreground">
+                        <TableHead className="w-28 px-3 text-xs text-muted-foreground">
                           <span className="flex items-center gap-1.5"><Truck className="size-3.5" aria-hidden="true" />预计送货</span>
                         </TableHead>
                         <TableHead className="w-20 px-2 text-xs text-muted-foreground">最后检查</TableHead>
