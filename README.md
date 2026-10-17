@@ -228,7 +228,7 @@ https://api.day.app/你的设备Key/这里改成你自己的推送内容
 
 测试按钮不会查询 Apple 库存，也不代表商品有货。只有手机实际收到通知，才能确认 Bark 链路已经可用。
 
-在 iPhone 上点开 Bark 通知会打开该型号的商品页：装了 Apple Store App 时直接进 App，没装时用 Safari 打开。这一跳转固定使用商品页，与电脑端的「到货后打开」选项无关，因为 Apple Store App 不接收购物袋链接。
+在 iPhone 上点开 Bark 通知会在 Apple Store App 里打开对应地区的购物袋，与电脑端的「到货后打开」选项无关。这条链接使用 App 自己的 `applestore://` 地址，需要先安装 Apple Store App，没装时点开没有反应。
 
 ### 第四步：测试其他提醒和页面跳转
 

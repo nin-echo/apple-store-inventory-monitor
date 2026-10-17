@@ -990,13 +990,12 @@ async fn test_notify(app: AppHandle) -> Result<(), String> {
         ));
     }
 
-    if let Some(url) = settings
+    let locale = settings
         .targets
         .first()
-        .and_then(|target| target_purchase_url(&app, target))
-        .or_else(|| jump_url.clone())
-    {
-        notification = notification.with_url(url);
+        .map_or(settings.locale.as_str(), |target| target.locale.as_str());
+    if let Some(region) = region_by_locale(locale) {
+        notification = notification.with_url(region.app_bag_url());
     }
     if let Some(url) = jump_url {
         use tauri_plugin_opener::OpenerExt;
@@ -1040,7 +1039,10 @@ async fn dispatch_notification(
 }
 
 fn in_stock_notification_body(target: &Target) -> String {
-    let mut body = format!("{} {}", target.store_title, target.product_name);
+    let mut body = format!(
+        "门店：{}\n型号：{}（{}）",
+        target.store_title, target.product_name, target.part_number
+    );
     if let Some(companion) = target
         .companion_part
         .as_deref()
@@ -1238,12 +1240,13 @@ async fn pump_events(app: AppHandle, mut events: tokio::sync::mpsc::Receiver<Eve
             let destination_url = target_open_url(&app, target, settings.open_on_hit);
             let bark_url = settings.bark_url_for(target).to_owned();
             let has_product_bark = settings.product_bark_urls.contains_key(&target.part_number);
-            let mut notification = Notification::new("有货了", in_stock_notification_body(target));
-            // Bark 先按通用链接打开，没有 App 认领才退回 Safari。Apple Store App
-            // 认领各地区的商品页与购买页，但不认领购物袋，所以 Bark 固定用商品页，
-            // 不跟随电脑端的「到货后打开」。
-            if let Some(url) = target_purchase_url(&app, target) {
-                notification = notification.with_url(url);
+            let mut notification = Notification::new(
+                format!("有货了：{}", target.product_name),
+                in_stock_notification_body(target),
+            );
+            // Bark 点开后在 Apple Store App 里打开购物袋，不跟随电脑端的「到货后打开」。
+            if let Some(region) = region_by_locale(&target.locale) {
+                notification = notification.with_url(region.app_bag_url());
             }
 
             let mut opened_destination = None;
@@ -1627,7 +1630,9 @@ mod tests {
             pickup_location: None,
         };
         let body = in_stock_notification_body(&target);
-        assert!(body.contains("Apple Watch Ultra 4"));
+        assert!(body.starts_with(
+            "门店：上海-香港广场\n型号：Apple Watch Ultra 4 49 毫米 黑色（MJCX4CH/B）"
+        ));
         assert!(body.contains("Watch 送货搭配表带 MKDY4FE/A"));
     }
 

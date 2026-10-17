@@ -308,6 +308,14 @@ impl Region {
         format!("{}/shop/bag", self.base_url)
     }
 
+    /// 在 Apple Store App 里打开购物袋的地址。
+    ///
+    /// 购物袋不在 App 认领的通用链接范围内，https 地址只会进 Safari；App 自己的
+    /// `applestore://` 会按后面的站点路径跳转。没装 App 时点开没有反应。
+    pub fn app_bag_url(&self) -> String {
+        self.bag_url().replacen("https://", "applestore://", 1)
+    }
+
     /// 对应地区的教育商店购物袋页面地址。
     pub fn education_bag_url(&self) -> String {
         if self.locale == "zh_CN" {
@@ -714,6 +722,17 @@ mod tests {
                 r.locale
             );
             assert!(!r.families.is_empty(), "{} 没有可抓取的购买页", r.locale);
+        }
+    }
+
+    #[test]
+    fn apple_store_app的购物袋地址保留地区路径() {
+        for (locale, expected) in [
+            ("zh_CN", "applestore://www.apple.com.cn/shop/bag"),
+            ("en_AU", "applestore://www.apple.com/au/shop/bag"),
+            ("en_US", "applestore://www.apple.com/shop/bag"),
+        ] {
+            assert_eq!(region_by_locale(locale).unwrap().app_bag_url(), expected);
         }
     }
 
