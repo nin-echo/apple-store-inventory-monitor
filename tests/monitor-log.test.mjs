@@ -86,6 +86,15 @@ test("送货日期按速度分色，并同时给出非颜色文字提示", () =>
   assert.equal(describePickupDate("星期六 2026/09/19；Apple 香港广场"),"9/19");
 });
 
+test("美国站不带年份的英文日期按查询日之后最近的一天计算", () => {
+  const checkedAt = new Date(2026, 9, 17, 15, 0).getTime();
+  assert.deepEqual(describeDelivery({saleMessage:"Mon, Jan 25 — Free"},checkedAt),{
+    label:"1/25",timing:"100 天后",tone:"later",detail:"Mon, Jan 25 — Free"
+  });
+  assert.equal(describeDelivery({saleMessage:"Tue, Oct 20 — Free"},checkedAt).timing,"3 天后");
+  assert.equal(describeDelivery({saleMessage:"Sat, Oct 17 — Free"},checkedAt).timing,"今天");
+});
+
 test("送货文案缺失、暂无供应与未知地区格式不会互相误判", () => {
   assert.equal(describeDelivery({saleMessage:null}),null);
   assert.equal(describeDelivery({saleMessage:"暂无供应 — 免费"}).tone,"unavailable");

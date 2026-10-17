@@ -137,7 +137,7 @@ export function describeDelivery(
   }
 
   const referenceMs = checkedAtMs ?? Date.now();
-  const dates = parseDeliveryDates(detail);
+  const dates = parseDeliveryDates(detail, referenceMs);
   if (dates.length > 0) {
     const firstDays = daysFrom(referenceMs, dates[0]!);
     return {
@@ -169,21 +169,30 @@ export function describePickupDate(pickupQuote?: string | null): string | null {
   return dates[0] ? formatShortDate(dates[0]) : null;
 }
 
-function parseDeliveryDates(raw: string): Date[] {
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+function parseDeliveryDates(raw: string, referenceMs = Date.now()): Date[] {
   const values: Date[] = [];
   const seen = new Set<number>();
-  const pattern = /\b(20\d{2})[/.\-](\d{1,2})[/.\-](\d{1,2})\b/g;
-  for (const match of raw.matchAll(pattern)) {
-    const year = Number(match[1]);
-    const month = Number(match[2]);
-    const day = Number(match[3]);
+  const push = (year: number, month: number, day: number) => {
     const date = new Date(year, month - 1, day, 12);
-    if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) continue;
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return;
     const time = date.getTime();
     if (!seen.has(time)) {
       seen.add(time);
       values.push(date);
     }
+  };
+  for (const match of raw.matchAll(/\b(20\d{2})[/.\-](\d{1,2})[/.\-](\d{1,2})\b/g)) {
+    push(Number(match[1]), Number(match[2]), Number(match[3]));
+  }
+  // 美国站写 "Mon, Jan 25"，不带年份：取查询当天及以后最近的那一天。
+  const reference = new Date(referenceMs);
+  for (const match of raw.matchAll(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/gi)) {
+    const month = MONTHS.indexOf(match[1]!.toLowerCase()) + 1;
+    const day = Number(match[2]);
+    const thisYear = new Date(reference.getFullYear(), month - 1, day, 23, 59);
+    push(reference.getFullYear() + (thisYear.getTime() < referenceMs ? 1 : 0), month, day);
   }
   return values;
 }
