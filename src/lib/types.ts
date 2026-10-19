@@ -176,6 +176,8 @@ export interface CheckoutSettings {
   contactEmail: string;
   /** 中国大陆手机号，不带 +86。 */
   contactPhone: string;
+  /** 美国站：到货结账时购物袋是空的就自动加入；关闭时定期检查购物袋并提醒。 */
+  autoAddToBag: boolean;
 }
 
 /** 本机 Clash 线路检查结果，不代表 Apple 一定接受这些节点。 */

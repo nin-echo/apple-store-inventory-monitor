@@ -154,9 +154,24 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
         </div>
 
         {us ? (
+          <>
           <p className="text-[11px] leading-4 break-words text-muted-foreground">
             美国站以访客身份结账，不需要登录：自动按门店邮编选门店和最早时段、填写下面的联系信息，停在付款页，由你填写付款信息并下单。
           </p>
+          <div className="setting-row">
+            <Label htmlFor="checkout-auto-add" className="text-sm font-normal">购物袋空时自动加入</Label>
+            <Switch
+              id="checkout-auto-add"
+              checked={checkout.autoAddToBag}
+              onCheckedChange={(autoAddToBag) => save({ autoAddToBag })}
+            />
+          </div>
+          <p className="text-[11px] leading-4 break-words text-muted-foreground">
+            {checkout.autoAddToBag
+              ? "到货时购物袋是空的，就在下单浏览器里按 Pay in full、Connect to any carrier later、无 AppleCare 加入这件商品；购物袋里有其他商品时仍会停下，不会替你改。"
+              : "开始监控时和之后每 30 分钟检查一次下单浏览器的购物袋，空了或型号不对就用 Bark 提醒你。"}
+          </p>
+          </>
         ) : (
         <div className="field-group">
           <Label htmlFor="checkout-id-suffix" className="control-label">取货人证件号码后四位</Label>
@@ -326,7 +341,7 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
         </div>
         <p className="text-[11px] leading-4 break-words text-muted-foreground">
           {us
-            ? "先打开下单浏览器，把要买的商品加入购物袋（购物袋里只放它）。浏览器关闭后购物袋可能清空，需要重新加入。试跑用它第一条监控项的门店，不会填写付款信息或下单。"
+            ? `${checkout.autoAddToBag ? "购物袋可以先空着，到货时自动加入。" : "先打开下单浏览器，把要买的商品加入购物袋（购物袋里只放它）。"}试跑用它第一条监控项的门店，不会填写付款信息或下单。`
             : "首次使用先打开下单浏览器，登录 Apple 账户、加入商品并手动走一次结账。试跑用「要下单的商品」和它第一条监控项的门店，不会提交订单。"}
         </p>
       </div>

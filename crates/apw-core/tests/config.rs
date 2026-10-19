@@ -133,6 +133,7 @@ fn 样例设置() -> Settings {
             contact_first_name: "三".into(),
             contact_email: "someone@example.com".into(),
             contact_phone: "13800000000".into(),
+            auto_add_to_bag: true,
         },
     }
 }

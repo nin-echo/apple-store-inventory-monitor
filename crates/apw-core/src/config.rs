@@ -336,6 +336,9 @@ pub struct CheckoutSettings {
     pub contact_email: String,
     /// 中国大陆手机号，不带 +86。
     pub contact_phone: String,
+    /// 美国站：到货结账时购物袋是空的，就自动加入（Pay in full、任意运营商、
+    /// 无 AppleCare）。关闭时改为开始监控时和定期检查购物袋，空了就提醒用户。
+    pub auto_add_to_bag: bool,
 }
 
 impl Default for CheckoutSettings {
@@ -354,6 +357,7 @@ impl Default for CheckoutSettings {
             contact_first_name: String::new(),
             contact_email: String::new(),
             contact_phone: String::new(),
+            auto_add_to_bag: false,
         }
     }
 }

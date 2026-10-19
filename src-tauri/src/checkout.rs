@@ -38,6 +38,8 @@ const SLOT_TIMEOUT: Duration = Duration::from_secs(8);
 /// 门店页的状态连续这么久没有变化，才认为异步加载结束了。
 const SETTLE_WINDOW: Duration = Duration::from_millis(1200);
 const ORDER_TIMEOUT: Duration = Duration::from_secs(45);
+/// 开启自动加购时，购物袋这么久还没出现商品就当作空的，去加购，不必干等完整超时。
+const BAG_EMPTY_GRACE: Duration = Duration::from_secs(5);
 
 /// 结账流程停下时所在的页面。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +97,8 @@ pub struct CheckoutPlan {
     pub bag_url: String,
     /// 美国站目标门店的邮编：有值时以访客身份结账、按它搜索门店，并停在付款页。
     pub us_postal_code: Option<String>,
+    /// 美国站：购物袋是空的时，打开这个商品页自动加入购物袋。`None` 表示不自动加入。
+    pub add_to_bag: Option<AddToBag>,
     pub store_number: String,
     pub store_title: String,
     pub product_name: String,
@@ -110,6 +114,13 @@ pub struct CheckoutPlan {
     pub accept_nearest_store: bool,
     /// 要填进取货信息页的联系信息：(结账页字段名, 值)。为空表示只核对 Apple 预填的内容。
     pub contact: Vec<(&'static str, String)>,
+}
+
+/// 自动加入购物袋要打开的商品页和要核对的零件号。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddToBag {
+    pub product_url: String,
+    pub part_number: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -149,6 +160,16 @@ impl CheckoutPlan {
             .then(|| catalog.store_by_number(&target.locale, &target.store_number))
             .flatten()
             .map(|store| store.postal_code);
+        let add_to_bag = (settings.auto_add_to_bag && us_postal_code.is_some())
+            .then(|| {
+                let product = catalog.product_by_part(&target.locale, &target.part_number);
+                target.purchase_url(product.as_ref())
+            })
+            .flatten()
+            .map(|product_url| AddToBag {
+                product_url,
+                part_number: target.part_number.clone(),
+            });
         // 美国站访客结账页的联系信息是空的，必须按设置填写。
         let contact = if settings.fill_contact || us_postal_code.is_some() {
             [
@@ -169,6 +190,7 @@ impl CheckoutPlan {
                 .map(|region| region.bag_url())
                 .unwrap_or_default(),
             us_postal_code,
+            add_to_bag,
             contact,
             monitored_stores,
             accept_nearest_store: settings.accept_nearest_store,
@@ -196,6 +218,52 @@ fn pickup_region_js(plan: &CheckoutPlan) -> String {
             "monitoredStores": plan.monitored_stores,
         })
     )
+}
+
+/// 在购买页按零件号选好配置并点「Add to Bag」：Pay in full、任意运营商、无 AppleCare。
+///
+/// 直接打开带 add-to-cart 参数的地址不会加入购物袋（实测两种写法都不行），必须在
+/// 页面上点选。配置值取自页面自带的产品表；点之前核对表单里的零件号就是目标型号。
+fn add_to_bag_js(part_number: &str) -> String {
+    format!(
+        r#"(async (part) => {{
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const pick = async (selector, optional) => {{
+    for (let i = 0; i < 40; i++) {{
+      const e = document.querySelector(selector);
+      if (e && !e.disabled) {{ if (!e.checked) e.click(); await sleep(800); return e.checked; }}
+      if (!e && optional && i > 4) return true;
+      await sleep(250);
+    }}
+    return false;
+  }};
+  const products = window.PRODUCT_SELECTION_BOOTSTRAP?.productSelectionData?.products || [];
+  const product = products.find((p) => p.partNumber === part);
+  if (!product) return {{ ok: false, error: '购买页里没有这个型号' }};
+  const dimensions = Object.keys(product)
+    .filter((key) => key.startsWith('dimension') && key !== 'dimensionSteporder' && typeof product[key] === 'string')
+    .map((key) => [`input[name="${{key}}"][value="${{product[key]}}"]`, false]);
+  // 以旧换新、付款方式、运营商、AppleCare 只有部分商品有，没有就跳过。
+  const options = ['input[name="tradeupinline"][value="noTradeIn"]', 'input[name="purchase_option_group"][value="fullprice"]',
+    'input[name="carrierModel"][value="UNLOCKED/US"]', 'input[data-autom="noapplecare"]'].map((selector) => [selector, true]);
+  for (const [selector, optional] of [...dimensions, ...options]) {{
+    if (!(await pick(selector, optional))) return {{ ok: false, error: '没能选中 ' + selector }};
+  }}
+  const button = document.querySelector('button[data-autom="add-to-cart"]');
+  const chosen = button && button.form ? [...button.form.elements].filter((e) => e.name === 'product').map((e) => e.value).filter(Boolean) : [];
+  if (!button || button.disabled) return {{ ok: false, error: 'Add to Bag 不可点击' }};
+  if (chosen.length !== 1 || chosen[0] !== part) return {{ ok: false, error: '页面选中的型号不对：' + chosen.join(',') }};
+  button.click();
+  return {{ ok: true, error: null }};
+}})({part}).then((result) => JSON.stringify(result))"#,
+        part = js_string(part_number)
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct AddToBagResult {
+    ok: bool,
+    error: Option<String>,
 }
 
 /// 美国站按目标门店邮编搜索取货门店。访客结账不搜索就无法继续；搜索后目标门店
@@ -662,11 +730,10 @@ impl Flow<'_> {
         }
     }
 
-    async fn bag(&mut self) -> Result<(), CheckoutError> {
-        self.report("自动结账：打开购物袋");
+    async fn navigate(&mut self, url: &str) -> Result<(), CheckoutError> {
         let navigation = self
             .session
-            .command("Page.navigate", json!({ "url": self.plan.bag_url }))
+            .command("Page.navigate", json!({ "url": url }))
             .await
             .map_err(|e| CheckoutError::new(Stage::Bag, e.to_string()))?;
         if let Some(error) = navigation
@@ -676,14 +743,20 @@ impl Flow<'_> {
         {
             return Err(CheckoutError::new(
                 Stage::Bag,
-                format!("购物袋页面打不开：{error}"),
+                format!("页面打不开：{error}"),
             ));
         }
+        Ok(())
+    }
+
+    /// 打开购物袋，等到出现可结账的商品并核对它就是要买的那一件。
+    async fn checked_bag(&mut self, timeout: Duration) -> Result<Lines, CheckoutError> {
+        self.navigate(&self.plan.bag_url.clone()).await?;
         let lines: Lines = self
             .wait(
                 Stage::Bag,
                 LINE_ITEMS_JS,
-                ELEMENT_TIMEOUT,
+                timeout,
                 "购物袋出现可结账的商品",
                 |lines: &Lines| lines.can_checkout && !lines.items.is_empty(),
             )
@@ -691,11 +764,80 @@ impl Flow<'_> {
             .map_err(|_| {
                 CheckoutError::new(
                     Stage::Bag,
-                    "购物袋里没有可结账的商品，请先在下单浏览器里登录并把商品加入购物袋",
+                    "购物袋里没有可结账的商品，请先在下单浏览器里把商品加入购物袋",
                 )
             })?;
         verify_items(&lines.items, &self.plan.product_name)
             .map_err(|message| CheckoutError::new(Stage::Bag, message))?;
+        Ok(lines)
+    }
+
+    /// 在商品购买页选好配置并加入购物袋，等页面进入加购后的下一步。
+    async fn add_to_bag(&mut self, add: &AddToBag) -> Result<(), CheckoutError> {
+        let stage = Stage::Bag;
+        self.report(format!(
+            "自动结账：购物袋是空的，自动加入 {}",
+            self.plan.product_name
+        ));
+        self.navigate(&add.product_url).await?;
+        const BUY_PAGE_READY_JS: &str = r#"JSON.stringify(document.readyState === 'complete' && !!window.PRODUCT_SELECTION_BOOTSTRAP?.productSelectionData?.products?.length)"#;
+        self.wait(
+            stage,
+            BUY_PAGE_READY_JS,
+            NAVIGATION_TIMEOUT,
+            "商品购买页",
+            |ready: &bool| *ready,
+        )
+        .await?;
+        let value = self
+            .session
+            .evaluate(&add_to_bag_js(&add.part_number), true)
+            .await
+            .map_err(|e| CheckoutError::new(stage, e.to_string()))?;
+        let result: AddToBagResult = value
+            .as_str()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .ok_or_else(|| CheckoutError::new(stage, "加入购物袋的页面脚本没有返回结果"))?;
+        if !result.ok {
+            return Err(CheckoutError::new(
+                stage,
+                format!("没能自动加入购物袋：{}", result.error.unwrap_or_default()),
+            ));
+        }
+        const ADDED_JS: &str =
+            r#"JSON.stringify(new URLSearchParams(location.search).get('step') === 'attach')"#;
+        self.wait(
+            stage,
+            ADDED_JS,
+            NAVIGATION_TIMEOUT,
+            "加入购物袋完成",
+            |added: &bool| *added,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn bag(&mut self) -> Result<(), CheckoutError> {
+        self.report("自动结账：打开购物袋");
+        match self.plan.add_to_bag.clone() {
+            // 购物袋空的才自动加入；里面有别的商品时照常停下，不替用户改购物袋。
+            Some(add) => match self.checked_bag(BAG_EMPTY_GRACE).await {
+                Ok(_) => {}
+                Err(_)
+                    if self
+                        .read::<Lines>(LINE_ITEMS_JS)
+                        .await
+                        .is_ok_and(|l| l.items.is_empty()) =>
+                {
+                    self.add_to_bag(&add).await?;
+                    self.checked_bag(ELEMENT_TIMEOUT).await?;
+                }
+                Err(error) => return Err(error),
+            },
+            None => {
+                self.checked_bag(ELEMENT_TIMEOUT).await?;
+            }
+        }
         // 美国站购物袋里有 Apple Card 分期商品时，结账按钮换成 bag-checkout-button。
         self.click(
             Stage::Bag,
@@ -1384,6 +1526,27 @@ impl CheckoutRunner {
         .await
     }
 
+    /// 打开下单浏览器的购物袋，核对里面只有要买的那一件。
+    ///
+    /// 有结账正在进行时不打扰它，直接算通过；到货时那次结账自己会再核对。
+    pub async fn check_bag(&self, plan: &CheckoutPlan) -> Result<(), CheckoutError> {
+        let Ok(mut slot) = self.session.try_lock() else {
+            return Ok(());
+        };
+        let session = Self::ensure(&mut slot).await?;
+        let progress = |_: String| {};
+        Flow {
+            session,
+            plan,
+            progress: &progress,
+            store_number: plan.store_number.clone(),
+            store_title: plan.store_title.clone(),
+        }
+        .checked_bag(ELEMENT_TIMEOUT)
+        .await
+        .map(|_| ())
+    }
+
     /// 是否有一次结账正在进行。
     pub fn is_busy(&self) -> bool {
         self.session.try_lock().is_err()
@@ -1505,6 +1668,18 @@ mod tests {
         // 访客结账页的联系信息是空的，即使没开「填写联系信息」也要填。
         assert_eq!(plan.contact, vec![("firstName", "Ann".to_string())]);
         assert!(zip_search_js("07078").contains(r#"const zip = "07078";"#));
+        assert_eq!(plan.add_to_bag, None, "没开自动加购时不加入购物袋");
+
+        settings.checkout.auto_add_to_bag = true;
+        let plan = CheckoutPlan::new(&target, &settings, &catalog, false);
+        assert_eq!(
+            plan.add_to_bag,
+            Some(AddToBag {
+                product_url: "https://www.apple.com/shop/product/MJW74LL/A".into(),
+                part_number: "MJW74LL/A".into(),
+            })
+        );
+        assert!(add_to_bag_js("MJW74LL/A").contains(r#"})("MJW74LL/A")"#));
     }
 
     #[test]
@@ -1514,6 +1689,7 @@ mod tests {
         let script = billing_choice_js(&CheckoutPlan {
             bag_url: "https://www.apple.com.cn/shop/bag".into(),
             us_postal_code: None,
+            add_to_bag: None,
             store_number: "R678".into(),
             store_title: "Apple 静安".into(),
             product_name: "x".into(),
@@ -1543,6 +1719,7 @@ mod tests {
         let plan = CheckoutPlan {
             bag_url: "https://www.apple.com.cn/shop/bag".into(),
             us_postal_code: None,
+            add_to_bag: None,
             store_number: env("APW_LIVE_STORE", "R678"),
             store_title: env("APW_LIVE_STORE_TITLE", "Apple 静安"),
             product_name: std::env::var("APW_LIVE_PRODUCT").expect("请设置 APW_LIVE_PRODUCT"),
@@ -1615,6 +1792,7 @@ mod tests {
         let plan = CheckoutPlan {
             bag_url: "https://www.apple.com.cn/shop/bag".into(),
             us_postal_code: None,
+            add_to_bag: None,
             store_number: "R678".into(),
             store_title: "Apple 静安".into(),
             product_name: "x".into(),

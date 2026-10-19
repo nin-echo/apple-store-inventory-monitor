@@ -34,7 +34,7 @@ const defaults = {
   checkout: {
     enabled: false, nationalIdSuffix: "", payment: "alipay",
     installmentBank: "招商银行", installmentPeriods: 24, placeOrder: false, acceptNearestStore: false, product: "",
-    fillContact: false, contactLastName: "", contactFirstName: "", contactEmail: "", contactPhone: "",
+    fillContact: false, contactLastName: "", contactFirstName: "", contactEmail: "", contactPhone: "", autoAddToBag: false,
   },
 };
 let generation = 0;

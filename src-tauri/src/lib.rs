@@ -770,9 +770,51 @@ async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result
 }
 
 #[tauri::command]
-async fn start_watching(state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn start_watching(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     state.watcher.start().await;
+    tauri::async_runtime::spawn(check_checkout_bag(app));
     Ok(())
+}
+
+/// 没开自动加购时，监控期间隔多久检查一次下单浏览器的购物袋。
+const BAG_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+/// 美国站开着自动结账、但没开自动加购时，核对下单浏览器的购物袋，有问题就提醒用户，
+/// 免得到货时才发现购物袋空了。
+async fn check_checkout_bag(app: AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let settings = state.settings_snapshot();
+    if !settings.checkout.enabled {
+        return;
+    }
+    let Some(target) = settings
+        .targets
+        .iter()
+        .find(|target| settings.is_checkout_target(target))
+        .cloned()
+    else {
+        return;
+    };
+    let plan = CheckoutPlan::new(&target, &settings, &state.catalog, false);
+    // 只检查美国站；开了自动加购也不必提前检查，到货时购物袋空了会自己加。
+    if plan.us_postal_code.is_none() || plan.add_to_bag.is_some() {
+        return;
+    }
+    if let Err(error) = state.checkout.check_bag(&plan).await {
+        let body = format!("{}：{}", target.product_name, error.message);
+        let _ = app.emit(NOTICE_CHANNEL, format!("购物袋检查未通过，{body}"));
+        if let Err(err) = dispatch_notification(
+            &app,
+            Notification::new("购物袋需要处理", body),
+            settings.bark_url_for(&target),
+        )
+        .await
+        {
+            let _ = app.emit(NOTICE_CHANNEL, format!("发送购物袋提醒时出错：{err}"));
+        }
+    }
 }
 
 #[tauri::command]
@@ -1567,6 +1609,21 @@ pub fn run() {
 
             let handle: AppHandle = app.handle().clone();
             tauri::async_runtime::spawn(pump_events(handle.clone(), events));
+            {
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(BAG_CHECK_INTERVAL).await;
+                        let running = match handle.try_state::<AppState>() {
+                            Some(state) => state.watcher.is_running().await,
+                            None => false,
+                        };
+                        if running {
+                            check_checkout_bag(handle.clone()).await;
+                        }
+                    }
+                });
+            }
 
             if let Err(err) = setup_tray(&handle) {
                 // 托盘建不起来只是少一项能力，不该让程序起不来。

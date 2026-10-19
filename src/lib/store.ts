@@ -119,6 +119,7 @@ const DEFAULT_SETTINGS: Settings = {
     contactFirstName: "",
     contactEmail: "",
     contactPhone: "",
+    autoAddToBag: false,
   },
 };
 
