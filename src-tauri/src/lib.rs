@@ -1080,7 +1080,21 @@ fn in_stock_notification_body(
 /// 打开下单浏览器，供用户登录 Apple 账户、加购并手动走一次结账。
 #[tauri::command]
 async fn open_checkout_browser(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.checkout.open().await.map_err(|e| e.to_string())
+    // 打开要下单商品所在地区的购物袋；还没选商品时用当前地区。
+    let settings = state.settings_snapshot();
+    let locale = settings
+        .targets
+        .iter()
+        .find(|target| settings.is_checkout_target(target))
+        .map_or(settings.locale.as_str(), |target| target.locale.as_str());
+    let bag_url = region_by_locale(locale)
+        .ok_or_else(|| format!("认不出地区 {locale}"))?
+        .bag_url();
+    state
+        .checkout
+        .open(&bag_url)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 试跑自动结账，走到「查看订单」页为止，无论设置如何都不提交订单。
@@ -1090,14 +1104,14 @@ async fn test_checkout(
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let settings = state.settings_snapshot();
-    if !settings.checkout.has_national_id_suffix() {
-        return Err("请先填写取货人证件号码后四位".into());
-    }
     let target = settings
         .targets
         .iter()
         .find(|target| settings.is_checkout_target(target))
-        .ok_or("试跑需要先确定要下单的商品：监控列表里要有它的中国大陆监控项，有多件商品时请在自动结账里选一件")?;
+        .ok_or("试跑需要先确定要下单的商品：监控列表里要有它的中国大陆或美国监控项，有多件商品时请在自动结账里选一件")?;
+    if target.locale == "zh_CN" && !settings.checkout.has_national_id_suffix() {
+        return Err("请先填写取货人证件号码后四位".into());
+    }
     let plan = CheckoutPlan::new(target, &settings, &state.catalog, false);
     let progress = move |message: String| {
         let _ = app.emit(NOTICE_CHANNEL, message);
@@ -1105,6 +1119,10 @@ async fn test_checkout(
     match state.checkout.run(&plan, &progress).await {
         Ok(CheckoutOutcome::ReachedReview { store, total }) => Ok(format!(
             "试跑完成：{store} {} 已到「查看订单」页（总计 {total}），没有提交订单。",
+            target.product_name
+        )),
+        Ok(CheckoutOutcome::ReachedPayment { store }) => Ok(format!(
+            "试跑完成：{store} {} 已到付款页，没有填写付款信息，也没有下单。",
             target.product_name
         )),
         Ok(CheckoutOutcome::OrderSubmitted { .. }) => {
@@ -1124,7 +1142,8 @@ async fn run_checkout_on_hit(app: AppHandle, target: Target) {
     };
     let settings = state.settings_snapshot();
     let bark_url = settings.bark_url_for(&target).to_owned();
-    if !settings.checkout.has_national_id_suffix() {
+    // 证件号码只有大陆站结账页需要。
+    if target.locale == "zh_CN" && !settings.checkout.has_national_id_suffix() {
         let _ = app.emit(
             NOTICE_CHANNEL,
             "自动结账未执行：还没有填写取货人证件号码后四位。",
@@ -1156,6 +1175,13 @@ async fn run_checkout_on_hit(app: AppHandle, target: Target) {
                 }
             }
             match outcome {
+                CheckoutOutcome::ReachedPayment { store } => (
+                    "已到付款页",
+                    format!(
+                        "{store} {}，门店、时段和取货信息已填好。请在下单浏览器里填写付款信息并下单。",
+                        target.product_name
+                    ),
+                ),
                 CheckoutOutcome::ReachedReview { store, total } => (
                     "已到查看订单页",
                     format!(

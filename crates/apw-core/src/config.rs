@@ -291,8 +291,8 @@ pub enum CheckoutPayment {
 /// Apple 结账页提供的分期期数。
 pub const INSTALLMENT_PERIODS: [u8; 5] = [1, 3, 6, 12, 24];
 
-/// 自动结账目前只支持中国大陆的结账页，其他地区的页面结构没有验证过。
-pub const CHECKOUT_LOCALE: &str = "zh_CN";
+/// 支持自动结账的地区。其他地区的结账页结构没有验证过。
+pub const CHECKOUT_LOCALES: [&str; 2] = ["zh_CN", "en_US"];
 
 /// 自动结账用来区分「是不是同一件商品」的标识。
 ///
@@ -307,7 +307,7 @@ pub fn checkout_product_key(target: &Target) -> String {
     )
 }
 
-/// 到货后自动结账的设置。目前只支持中国大陆的直营店取货。
+/// 到货后自动结账的设置。支持中国大陆和美国的直营店取货。
 ///
 /// 默认整体关闭；即使开启，也默认停在「查看订单」页由用户自己点「立即下单」。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,7 +554,7 @@ impl Settings {
     fn checkout_candidates(&self) -> Vec<String> {
         let mut keys: Vec<String> = Vec::new();
         for target in &self.targets {
-            if target.locale != CHECKOUT_LOCALE {
+            if !CHECKOUT_LOCALES.contains(&target.locale.as_str()) {
                 continue;
             }
             let key = checkout_product_key(target);
@@ -579,7 +579,7 @@ impl Settings {
 
     /// 这条监控项到货时是否应当触发自动结账。
     pub fn is_checkout_target(&self, target: &Target) -> bool {
-        target.locale == CHECKOUT_LOCALE
+        CHECKOUT_LOCALES.contains(&target.locale.as_str())
             && self.checkout_product().as_deref() == Some(checkout_product_key(target).as_str())
     }
 

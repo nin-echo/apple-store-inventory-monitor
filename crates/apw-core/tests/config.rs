@@ -895,3 +895,17 @@ fn 其他地区的监控项不会触发自动结账() {
     assert_eq!(settings.checkout_product(), None);
     assert!(!settings.checkout.enabled);
 }
+
+#[test]
+fn 美国监控项可以自动结账而其他海外站不行() {
+    let mut us = 目标("R043", "MJW74LL/A");
+    us.locale = "en_US".into();
+    let mut jp = 目标("R718", "JP/A");
+    jp.locale = "ja_JP".into();
+    let settings = Settings {
+        targets: vec![us.clone(), jp.clone()],
+        ..Settings::default()
+    };
+    assert!(settings.is_checkout_target(&us));
+    assert!(!settings.is_checkout_target(&jp));
+}

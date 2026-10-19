@@ -1361,7 +1361,9 @@ export default function App() {
                 </Button>
               </CollapsiblePanel>
 
-              {showMainland ? <CheckoutSettings checkout={ui.settings.checkout} targets={ui.settings.targets} /> : null}
+              {showMainland || ui.settings.targets.some((target) => target.locale === "en_US") ? (
+                <CheckoutSettings checkout={ui.settings.checkout} targets={ui.settings.targets} />
+              ) : null}
 
               <NetworkSettings network={ui.settings.network} running={ui.running} route={ui.route} />
 

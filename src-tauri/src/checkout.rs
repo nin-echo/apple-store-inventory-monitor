@@ -1,4 +1,7 @@
-//! 到货后自动结账（中国大陆直营店取货）。
+//! 到货后自动结账（中国大陆、美国直营店取货）。
+//!
+//! 美国站以访客身份结账：结账页要求重新登录，访客不需要 Apple ID。先按目标门店
+//! 邮编搜索门店，填完取货信息、进入付款页后停下，付款信息由用户自己填写。
 //!
 //! 使用一个带窗口的专属 Chromium 会话：用户在里面登录 Apple 账户、把商品放进
 //! 购物袋；到货时由这里依次操作购物袋、选择门店、取货信息、付款方式和查看订单
@@ -16,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use apw_core::catalog::Catalog;
 use apw_core::config::{CheckoutPayment, Settings, checkout_product_key};
-use apw_core::model::Target;
+use apw_core::model::{Target, region_by_locale};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -25,7 +28,6 @@ use tokio::sync::Mutex;
 use crate::chromium_fetcher::{ChromiumSession, app_profile_dir};
 
 const PROFILE_DIR: &str = "checkout-profile-v1";
-const BAG_URL: &str = "https://www.apple.com.cn/shop/bag";
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
 // Apple 的结账接口实测每次要 9 到 17 秒才返回，超时必须明显长于这个数，
 // 否则会在请求还没回来时重复点击，反而更慢。
@@ -89,6 +91,10 @@ impl fmt::Display for CheckoutError {
 /// 一次自动结账要完成的内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutPlan {
+    /// 目标门店所在地区的购物袋地址。
+    pub bag_url: String,
+    /// 美国站目标门店的邮编：有值时以访客身份结账、按它搜索门店，并停在付款页。
+    pub us_postal_code: Option<String>,
     pub store_number: String,
     pub store_title: String,
     pub product_name: String,
@@ -139,7 +145,12 @@ impl CheckoutPlan {
             })
             .map(|other| other.store_number.clone())
             .collect();
-        let contact = if settings.fill_contact {
+        let us_postal_code = (target.locale == "en_US")
+            .then(|| catalog.store_by_number(&target.locale, &target.store_number))
+            .flatten()
+            .map(|store| store.postal_code);
+        // 美国站访客结账页的联系信息是空的，必须按设置填写。
+        let contact = if settings.fill_contact || us_postal_code.is_some() {
             [
                 ("lastName", &settings.contact_last_name),
                 ("firstName", &settings.contact_first_name),
@@ -154,6 +165,10 @@ impl CheckoutPlan {
             Vec::new()
         };
         Self {
+            bag_url: region_by_locale(&target.locale)
+                .map(|region| region.bag_url())
+                .unwrap_or_default(),
+            us_postal_code,
             contact,
             monitored_stores,
             accept_nearest_store: settings.accept_nearest_store,
@@ -183,6 +198,37 @@ fn pickup_region_js(plan: &CheckoutPlan) -> String {
     )
 }
 
+/// 美国站按目标门店邮编搜索取货门店。访客结账不搜索就无法继续；搜索后目标门店
+/// 排在列表最前面、默认展开。每一步只做一次，轮询期间只观察异步进度。
+fn zip_search_js(zip: &str) -> String {
+    format!(
+        r#"(() => {{
+  const zip = {zip};
+  const result = (ready) => JSON.stringify({{ ready, error: null }});
+  const visible = (e) => e && e.getClientRects().length > 0;
+  const picker = [...document.querySelectorAll('button[data-autom="fulfillment-pickup-store-search-button"]')].find(visible);
+  if (picker && (picker.innerText || '').trim() === zip) return result(true);
+  const progress = window.__apwZip || (window.__apwZip = {{}});
+  const input = [...document.querySelectorAll('input[data-autom="bag-storelocator-input"]')].find(visible);
+  if (!input) {{
+    if (picker && !progress.opened) {{ progress.opened = true; picker.click(); }}
+    return result(false);
+  }}
+  const apply = document.querySelector('button[data-autom="checkout-cityState-apply"]');
+  if (!progress.applied && apply) {{
+    progress.applied = true;
+    input.focus();
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, zip);
+    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    apply.click();
+  }}
+  return result(false);
+}})()"#,
+        zip = js_string(zip)
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct PickupRegionState {
     ready: bool,
@@ -193,6 +239,8 @@ struct PickupRegionState {
 pub enum CheckoutOutcome {
     /// 已停在「查看订单」页，等用户自己点「立即下单」。
     ReachedReview { store: String, total: String },
+    /// 美国站：取货信息已填好，停在付款页，等用户自己填写付款信息。
+    ReachedPayment { store: String },
     /// 已点「立即下单」。`order_number` 为空表示页面上没有读到订单号，
     /// 订单是否成立需要用户在浏览器窗口里确认。
     OrderSubmitted {
@@ -248,7 +296,10 @@ fn verify_items(items: &[LineItem], product_name: &str) -> Result<(), String> {
 /// 结账页的门店标签形如「2 Apple 静安 明天 可取货 店内取货」或「… 目前不可取货 …」。
 fn store_label_unavailable(label: &str) -> bool {
     let compact: String = label.chars().filter(|c| !c.is_whitespace()).collect();
-    compact.contains("不可取货") || compact.contains("无法取货") || compact.contains("暂无供应")
+    compact.contains("不可取货")
+        || compact.contains("无法取货")
+        || compact.contains("暂无供应")
+        || compact.to_lowercase().contains("unavailable")
 }
 
 fn js_string(value: &str) -> String {
@@ -290,7 +341,7 @@ const LINE_ITEMS_JS: &str = r#"(() => {
   return JSON.stringify({
     items,
     total: total ? total.innerText.replace(/\s+/g, ' ').trim() : '',
-    canCheckout: !!document.querySelector('button[data-autom="checkout"]'),
+    canCheckout: !!document.querySelector('button[data-autom="checkout"], button[data-autom="bag-checkout-button"]'),
     canPlaceOrder: !!document.querySelector('button[data-autom="continue-button-placeOrder"]'),
   });
 })()"#;
@@ -615,7 +666,7 @@ impl Flow<'_> {
         self.report("自动结账：打开购物袋");
         let navigation = self
             .session
-            .command("Page.navigate", json!({ "url": BAG_URL }))
+            .command("Page.navigate", json!({ "url": self.plan.bag_url }))
             .await
             .map_err(|e| CheckoutError::new(Stage::Bag, e.to_string()))?;
         if let Some(error) = navigation
@@ -645,8 +696,46 @@ impl Flow<'_> {
             })?;
         verify_items(&lines.items, &self.plan.product_name)
             .map_err(|message| CheckoutError::new(Stage::Bag, message))?;
-        self.click(Stage::Bag, r#"button[data-autom="checkout"]"#, "结账")
+        // 美国站购物袋里有 Apple Card 分期商品时，结账按钮换成 bag-checkout-button。
+        self.click(
+            Stage::Bag,
+            r#"button[data-autom="checkout"], button[data-autom="bag-checkout-button"]"#,
+            "结账",
+        )
+        .await?;
+        if self.plan.us_postal_code.is_some() {
+            const GUEST_OR_FULFILLMENT_JS: &str = r#"(() => {
+  if (/^Fulfillment/.test(new URLSearchParams(location.search).get('_s') || '')) return JSON.stringify('fulfillment');
+  return JSON.stringify(document.querySelector('button[data-autom="guest-checkout-btn"]') ? 'guest' : '');
+})()"#;
+            let next: String = self
+                .wait(
+                    Stage::SignIn,
+                    GUEST_OR_FULFILLMENT_JS,
+                    NAVIGATION_TIMEOUT,
+                    "访客结账入口",
+                    |next: &String| !next.is_empty(),
+                )
+                .await?;
+            if next == "guest" {
+                self.click(
+                    Stage::SignIn,
+                    r#"button[data-autom="guest-checkout-btn"]"#,
+                    "以访客身份继续",
+                )
+                .await?;
+            }
+            // 访客按钮就在登录页上，点完后页面还会停留片刻，不能按「出现登录页」判错。
+            self.wait(
+                Stage::SignIn,
+                GUEST_OR_FULFILLMENT_JS,
+                NAVIGATION_TIMEOUT,
+                "取货页",
+                |next: &String| next == "fulfillment",
+            )
             .await?;
+            return Ok(());
+        }
         self.wait_for_step(Stage::Bag, "Fulfillment").await
     }
 
@@ -656,7 +745,7 @@ impl Flow<'_> {
 
         // 结账默认停在「为我送货」，取货门店列表要切到「我要取货」后才加载。
         const PICKUP_TAB_JS: &str = r#"(() => {
-  const tab = [...document.querySelectorAll('button')].find((e) => (e.innerText || '').trim() === '我要取货');
+  const tab = [...document.querySelectorAll('button')].find((e) => /^(我要取货|I.ll pick it up)$/i.test((e.innerText || '').trim()));
   if (!tab) return JSON.stringify('missing');
   // 这是一组 role="radio" 的按钮，选中状态写在 aria-checked 上。
   if (tab.getAttribute('aria-checked') === 'true' || tab.getAttribute('aria-pressed') === 'true') return JSON.stringify('selected');
@@ -827,7 +916,10 @@ impl Flow<'_> {
 
     /// 列表为空时可能是官网还没选地区，必须先完成目标门店所在省市区的选择。
     async fn prepare_pickup_region(&mut self) -> Result<(), CheckoutError> {
-        let script = pickup_region_js(self.plan);
+        let script = match &self.plan.us_postal_code {
+            Some(zip) => zip_search_js(zip),
+            None => pickup_region_js(self.plan),
+        };
         let state: PickupRegionState = self
             .wait(
                 Stage::Fulfillment,
@@ -1035,7 +1127,10 @@ impl Flow<'_> {
     input.dispatchEvent(new Event('input', {{ bubbles: true }}));
     input.dispatchEvent(new Event('change', {{ bubbles: true }}));
     input.blur();
-    if (input.value !== value) failed.push(name);
+    // 美国站的手机号输入框会自动加括号和连字符，只比较数字。
+    const digits = (text) => text.replace(/\D/g, '');
+    const same = name === 'fullDaytimePhone' ? digits(input.value) === digits(value) : input.value === value;
+    if (!same) failed.push(name);
   }}
   return JSON.stringify(failed);
 }})()"#,
@@ -1205,6 +1300,11 @@ impl Flow<'_> {
         self.bag().await?;
         self.fulfillment().await?;
         self.pickup_contact().await?;
+        if self.plan.us_postal_code.is_some() {
+            return Ok(CheckoutOutcome::ReachedPayment {
+                store: self.store_title.clone(),
+            });
+        }
         self.billing().await?;
         self.review().await
     }
@@ -1242,13 +1342,13 @@ impl CheckoutRunner {
     }
 
     /// 打开下单浏览器并显示购物袋，供用户登录、加购和预热结账。
-    pub async fn open(&self) -> Result<(), CheckoutError> {
+    pub async fn open(&self, bag_url: &str) -> Result<(), CheckoutError> {
         let mut slot = self.session.lock().await;
         let session = Self::ensure(&mut slot).await?;
         let browser_error =
             |e: apw_core::apple::ApiError| CheckoutError::new(Stage::Browser, e.to_string());
         session
-            .command("Page.navigate", json!({ "url": BAG_URL }))
+            .command("Page.navigate", json!({ "url": bag_url }))
             .await
             .map_err(browser_error)?;
         session
@@ -1371,6 +1471,40 @@ mod tests {
             "4 Apple 七宝 目前不可取货 店内取货"
         ));
         assert!(store_label_unavailable("4Apple 七宝目前不可取货店内取货"));
+        assert!(!store_label_unavailable(
+            "Apple Staten Island 18.14 mi Available Today In-Store Pickup"
+        ));
+        assert!(store_label_unavailable(
+            "Apple SoHo 5.2 mi Currently unavailable In-Store Pickup"
+        ));
+    }
+
+    #[test]
+    fn 美国站结账走访客流程并按门店邮编搜索() {
+        let catalog = Catalog::new();
+        let target = Target {
+            locale: "en_US".into(),
+            store_number: "R043".into(),
+            store_title: "New Jersey-Short Hills".into(),
+            part_number: "MJW74LL/A".into(),
+            product_name: "iPhone 18 Pro Max 256GB Glacier".into(),
+            companion_part: None,
+            companion_name: None,
+            kit_part: None,
+            pickup_location: None,
+        };
+        let mut settings = Settings {
+            targets: vec![target.clone()],
+            ..Settings::default()
+        };
+        settings.checkout.contact_first_name = "Ann".into();
+        let plan = CheckoutPlan::new(&target, &settings, &catalog, false);
+        assert_eq!(plan.bag_url, "https://www.apple.com/shop/bag");
+        assert_eq!(plan.us_postal_code.as_deref(), Some("07078"));
+        assert_eq!(plan.pickup_region, None);
+        // 访客结账页的联系信息是空的，即使没开「填写联系信息」也要填。
+        assert_eq!(plan.contact, vec![("firstName", "Ann".to_string())]);
+        assert!(zip_search_js("07078").contains(r#"const zip = "07078";"#));
     }
 
     #[test]
@@ -1378,6 +1512,8 @@ mod tests {
         let script = store_state_js("R1\"); alert(1); (\"");
         assert!(script.contains(r#"e.value === "R1\"); alert(1); (\"""#));
         let script = billing_choice_js(&CheckoutPlan {
+            bag_url: "https://www.apple.com.cn/shop/bag".into(),
+            us_postal_code: None,
             store_number: "R678".into(),
             store_title: "Apple 静安".into(),
             product_name: "x".into(),
@@ -1405,6 +1541,8 @@ mod tests {
         let env =
             |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
         let plan = CheckoutPlan {
+            bag_url: "https://www.apple.com.cn/shop/bag".into(),
+            us_postal_code: None,
             store_number: env("APW_LIVE_STORE", "R678"),
             store_title: env("APW_LIVE_STORE_TITLE", "Apple 静安"),
             product_name: std::env::var("APW_LIVE_PRODUCT").expect("请设置 APW_LIVE_PRODUCT"),
@@ -1467,11 +1605,16 @@ mod tests {
             .await
             .expect("下单浏览器启动失败");
         session
-            .command("Page.navigate", json!({ "url": BAG_URL }))
+            .command(
+                "Page.navigate",
+                json!({ "url": "https://www.apple.com.cn/shop/bag" }),
+            )
             .await
             .expect("购物袋页面导航失败");
         let progress = |_: String| {};
         let plan = CheckoutPlan {
+            bag_url: "https://www.apple.com.cn/shop/bag".into(),
+            us_postal_code: None,
             store_number: "R678".into(),
             store_title: "Apple 静安".into(),
             product_name: "x".into(),

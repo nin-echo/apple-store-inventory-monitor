@@ -49,8 +49,9 @@ function periodsFor(bank: string): readonly number[] {
   return bank === "花呗分期" ? INSTALLMENT_PERIODS.filter((periods) => periods <= 12) : INSTALLMENT_PERIODS;
 }
 
-function summarize(checkout: Checkout): string {
+function summarize(checkout: Checkout, us: boolean): string {
   if (!checkout.enabled) return "未开启";
+  if (us) return "到货后停在付款页";
   return checkout.placeOrder ? "到货后自动提交订单" : "到货后停在查看订单页";
 }
 
@@ -59,17 +60,18 @@ function productKey(target: Target): string {
   return [target.partNumber, target.companionPart ?? "", target.kitPart ?? ""].join("|");
 }
 
-/** 监控列表里可以自动结账的不同商品（目前只支持中国大陆）。 */
-function monitoredProducts(targets: Target[]): { key: string; name: string }[] {
-  const products = new Map<string, string>();
+/** 监控列表里可以自动结账的不同商品（中国大陆和美国，与后端 CHECKOUT_LOCALES 一致）。 */
+function monitoredProducts(targets: Target[]): { key: string; name: string; us: boolean }[] {
+  const products = new Map<string, { name: string; us: boolean }>();
   for (const target of targets) {
-    if (target.locale !== "zh_CN") continue;
+    if (target.locale !== "zh_CN" && target.locale !== "en_US") continue;
     const key = productKey(target);
     if (!products.has(key)) {
-      products.set(key, target.companionName ? `${target.productName} · ${target.companionName}` : target.productName);
+      const name = target.companionName ? `${target.productName} · ${target.companionName}` : target.productName;
+      products.set(key, { name, us: target.locale === "en_US" });
     }
   }
-  return [...products].map(([key, name]) => ({ key, name }));
+  return [...products].map(([key, product]) => ({ key, ...product }));
 }
 
 export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; targets: Target[] }) {
@@ -90,6 +92,11 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
   const save = (patch: Partial<Checkout>) => void saveSettings({ checkout: { ...checkout, ...patch } });
   const contact = (key: ContactKey) => (value: string) => save({ [key]: value });
   const suffixReady = checkout.nationalIdSuffix.length === 4;
+  // 美国站以访客身份结账：不要证件号码，但联系信息四项都要有。
+  const us = products.find((product) => product.key === chosen)?.us ?? false;
+  const contactReady = [checkout.contactLastName, checkout.contactFirstName, checkout.contactEmail, checkout.contactPhone]
+    .every((value) => value.trim() !== "");
+  const ready = us ? contactReady : suffixReady;
   const run = async (kind: "open" | "test", action: () => Promise<void>) => {
     setBusy(kind);
     await action();
@@ -101,8 +108,8 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
       id="checkout"
       icon={<ShoppingCart className="size-4" />}
       title="自动结账"
-      subtitle="到货后自动走完结账页面，仅支持中国大陆直营店取货"
-      summary={summarize(checkout)}
+      subtitle="到货后自动走完结账页面，支持中国大陆和美国直营店取货"
+      summary={summarize(checkout, us)}
     >
       <div className="grid min-w-0 gap-3">
         <div className="setting-row">
@@ -110,7 +117,7 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
           <Switch
             id="checkout-enabled"
             checked={checkout.enabled}
-            disabled={(!suffixReady || !chosen) && !checkout.enabled}
+            disabled={(!ready || !chosen) && !checkout.enabled}
             onCheckedChange={(enabled) => save({ enabled })}
           />
         </div>
@@ -132,7 +139,7 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
             </Select>
           ) : (
             <p id="checkout-product" className="text-sm break-words">
-              {products[0]?.name ?? "监控列表里还没有中国大陆的商品"}
+              {products[0]?.name ?? "监控列表里还没有中国大陆或美国的商品"}
             </p>
           )}
           {products.length > 1 && !chosen ? (
@@ -146,6 +153,11 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
           )}
         </div>
 
+        {us ? (
+          <p className="text-[11px] leading-4 break-words text-muted-foreground">
+            美国站以访客身份结账，不需要登录：自动按门店邮编选门店和最早时段、填写下面的联系信息，停在付款页，由你填写付款信息并下单。
+          </p>
+        ) : (
         <div className="field-group">
           <Label htmlFor="checkout-id-suffix" className="control-label">取货人证件号码后四位</Label>
           <Input
@@ -164,7 +176,9 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
             Apple 每次结账都要求填写，且必须与取货时出示的证件一致。只保存在本机的设置文件里。
           </p>
         </div>
+        )}
 
+        {us ? null : (
         <div className="setting-row">
           <Label htmlFor="checkout-fill-contact" className="text-sm font-normal">按下面的信息填写取货联系人</Label>
           <Switch
@@ -173,12 +187,15 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
             onCheckedChange={(fillContact) => save({ fillContact })}
           />
         </div>
+        )}
         <p className="text-[11px] leading-4 break-words text-muted-foreground">
-          {checkout.fillContact
+          {us
+            ? "访客结账页的联系信息是空的，四项都要填。姓名须与取货证件一致，下单后无法更改。"
+            : checkout.fillContact
             ? "会覆盖结账页上 Apple 预填的内容，留空的项沿用页面上已有的值。姓名须与取货证件一致，下单后无法更改。"
             : "关闭时沿用 Apple 预填的联系信息，只检查有没有缺项。"}
         </p>
-        {checkout.fillContact ? (
+        {checkout.fillContact || us ? (
           <div className="grid min-w-0 grid-cols-2 gap-2">
             <ContactField id="checkout-last-name" label="姓氏" saved={checkout.contactLastName} onSave={contact("contactLastName")} />
             <ContactField id="checkout-first-name" label="名字" saved={checkout.contactFirstName} onSave={contact("contactFirstName")} />
@@ -186,11 +203,13 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
               <ContactField id="checkout-email" label="电子邮件地址" type="email" saved={checkout.contactEmail} onSave={contact("contactEmail")} />
             </div>
             <div className="col-span-2">
-              <ContactField id="checkout-phone" label="手机号码（不带 +86）" inputMode="numeric" saved={checkout.contactPhone} onSave={contact("contactPhone")} />
+              <ContactField id="checkout-phone" label={us ? "手机号码（10 位）" : "手机号码（不带 +86）"} inputMode="numeric" saved={checkout.contactPhone} onSave={contact("contactPhone")} />
             </div>
           </div>
         ) : null}
 
+        {us ? null : (
+        <>
         <div className="field-group">
           <Label htmlFor="checkout-payment" className="control-label">付款方式</Label>
           <Select value={checkout.payment} onValueChange={(payment) => save({ payment: payment as CheckoutPayment })}>
@@ -248,6 +267,8 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
             </p>
           </div>
         ) : null}
+        </>
+        )}
 
         <div className="setting-row">
           <Label htmlFor="checkout-nearest-store" className="text-sm font-normal">优先用结账页默认选中的门店</Label>
@@ -263,6 +284,8 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
             : "只在监控到货的门店取货；结账页默认选中的门店也在这件商品的监控列表里时，直接用它。"}
         </p>
 
+        {us ? null : (
+        <>
         <div className="setting-row">
           <Label htmlFor="checkout-place-order" className="text-sm font-normal">核对通过后自动点「立即下单」</Label>
           <Switch
@@ -276,6 +299,8 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
             ? "会生成真实订单，下单后取货信息无法更改。付款仍需你在 30 分钟内自己完成。"
             : "关闭时停在「查看订单」页，由你自己点「立即下单」并付款。"}
         </p>
+        </>
+        )}
 
         <div className="grid min-w-0 grid-cols-2 gap-2">
           <Button
@@ -292,15 +317,17 @@ export function CheckoutSettings({ checkout, targets }: { checkout: Checkout; ta
             type="button"
             variant="outline"
             className="h-10 rounded-xl border-border/70 bg-background/30"
-            disabled={busy !== null || !suffixReady || !chosen}
+            disabled={busy !== null || !ready || !chosen}
             onClick={() => void run("test", testCheckout)}
           >
             {busy === "test" ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <PlayCircle aria-hidden="true" />}
-            试跑到查看订单页
+            {us ? "试跑到付款页" : "试跑到查看订单页"}
           </Button>
         </div>
         <p className="text-[11px] leading-4 break-words text-muted-foreground">
-          首次使用先打开下单浏览器，登录 Apple 账户、加入商品并手动走一次结账。试跑用「要下单的商品」和它第一条监控项的门店，不会提交订单。
+          {us
+            ? "先打开下单浏览器，把要买的商品加入购物袋（购物袋里只放它）。浏览器关闭后购物袋可能清空，需要重新加入。试跑用它第一条监控项的门店，不会填写付款信息或下单。"
+            : "首次使用先打开下单浏览器，登录 Apple 账户、加入商品并手动走一次结账。试跑用「要下单的商品」和它第一条监控项的门店，不会提交订单。"}
         </p>
       </div>
     </CollapsiblePanel>
