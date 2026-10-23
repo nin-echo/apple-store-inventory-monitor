@@ -1597,21 +1597,21 @@ pub fn run() {
             let (watcher, events, engine) = Watcher::new(fetcher.clone(), watcher_config);
             tauri::async_runtime::spawn(engine);
 
+            let start_now = std::env::args().any(|arg| arg == START_MONITORING_ARG);
             {
                 let watcher = watcher.clone();
                 let fetcher = fetcher.clone();
                 let network = settings.network.clone();
                 let targets = settings.targets.clone();
                 let interval = settings.interval();
-                let handle = app.handle().clone();
-                let start_now = std::env::args().any(|arg| arg == START_MONITORING_ARG);
                 tauri::async_runtime::spawn(async move {
                     fetcher.set_network(network).await;
                     watcher.set_targets(targets).await;
                     watcher.set_interval(interval).await;
-                    // 必须在目标列表交给引擎之后再开始，否则第一轮查的是空列表。
+                    // 必须在目标列表交给引擎之后再开始，否则第一轮查的是空列表。这里还
+                    // 在 app.manage 之前，AppState 未必可用，所以直接用手上的 watcher。
                     if start_now {
-                        begin_watching(handle).await;
+                        watcher.start().await;
                     }
                 });
             }
@@ -1628,6 +1628,9 @@ pub fn run() {
 
             let handle: AppHandle = app.handle().clone();
             tauri::async_runtime::spawn(pump_events(handle.clone(), events));
+            if start_now {
+                tauri::async_runtime::spawn(check_checkout_bag(handle.clone()));
+            }
             {
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
