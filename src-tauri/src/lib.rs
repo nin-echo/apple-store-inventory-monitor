@@ -770,10 +770,19 @@ async fn set_interval(state: tauri::State<'_, AppState>, seconds: u64) -> Result
 }
 
 #[tauri::command]
-async fn start_watching(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.watcher.start().await;
-    tauri::async_runtime::spawn(check_checkout_bag(app));
+async fn start_watching(app: AppHandle) -> Result<(), String> {
+    begin_watching(app).await;
     Ok(())
+}
+
+/// 带这个参数启动应用时开始监控；应用已在运行时由单实例回调转给它。用于定时开始。
+const START_MONITORING_ARG: &str = "--start-monitoring";
+
+async fn begin_watching(app: AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.watcher.start().await;
+    }
+    tauri::async_runtime::spawn(check_checkout_bag(app));
 }
 
 /// 没开自动加购时，监控期间隔多久检查一次下单浏览器的购物袋。
@@ -1538,7 +1547,11 @@ fn load_settings(notices: &mut Vec<String>) -> (Settings, Option<SettingsStore>)
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _| {
+            if argv.iter().any(|arg| arg == START_MONITORING_ARG) {
+                tauri::async_runtime::spawn(begin_watching(app.clone()));
+                return;
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
@@ -1590,10 +1603,16 @@ pub fn run() {
                 let network = settings.network.clone();
                 let targets = settings.targets.clone();
                 let interval = settings.interval();
+                let handle = app.handle().clone();
+                let start_now = std::env::args().any(|arg| arg == START_MONITORING_ARG);
                 tauri::async_runtime::spawn(async move {
                     fetcher.set_network(network).await;
                     watcher.set_targets(targets).await;
                     watcher.set_interval(interval).await;
+                    // 必须在目标列表交给引擎之后再开始，否则第一轮查的是空列表。
+                    if start_now {
+                        begin_watching(handle).await;
+                    }
                 });
             }
 
