@@ -97,6 +97,11 @@ impl RoutePool {
         {
             return Some(active);
         }
+        self.next(site, now)
+    }
+
+    /// 当前线路之后第一条可用的其他线路；没有别的可用线路时为 `None`。
+    pub fn next(&self, site: &str, now: Instant) -> Option<&str> {
         let start = self
             .active
             .as_ref()
@@ -104,7 +109,9 @@ impl RoutePool {
             .map_or(0, |index| index + 1);
         (0..self.routes.len())
             .map(|offset| &self.routes[(start + offset) % self.routes.len()])
-            .find(|route| self.is_available(route, site, now))
+            .find(|route| {
+                self.active() != Some(route.as_str()) && self.is_available(route, site, now)
+            })
             .map(String::as_str)
     }
 
@@ -192,6 +199,18 @@ mod tests {
         let mut pool = RoutePool::default();
         pool.set_routes(names.iter().map(|name| name.to_string()).collect());
         pool
+    }
+
+    #[test]
+    fn 主动换节点时跳过当前和冷却中的节点() {
+        let now = Instant::now();
+        let mut pool = pool(&["A", "B", "C"]);
+        pool.set_active(Some("A".into()));
+        pool.block("B", SITE, now);
+        assert_eq!(pool.next(SITE, now), Some("C"));
+        pool.block("C", SITE, now);
+        assert_eq!(pool.next(SITE, now), None, "没有别的可用节点时不换");
+        assert_eq!(pool.choose(SITE, now), Some("A"));
     }
 
     #[test]

@@ -49,6 +49,11 @@ const EXPRESS_VPN_PROFILE_DIR: &str = "chromium-profile-xvpn";
 /// 一轮里最多连续换几次 ExpressVPN 出口。全都被拒时多半不是单个 IP 的问题，
 /// 改为冷却，避免每轮都让整台电脑的网络断几次。
 const MAX_VPN_ROTATIONS_PER_CYCLE: u32 = 3;
+/// 实测同一份 Cookie 约 31 次、同一 IP 约 62 次请求后 Apple 返回 541。
+/// 各留几次余量：Cookie 用到这里就主动清掉，留在同一出口继续查。
+const COOKIE_REQUEST_BUDGET: u32 = 28;
+/// Clash 轮换下同一出口用到这里就主动换下一个节点，不等 541。
+const EXIT_REQUEST_BUDGET: u32 = 56;
 const EXPRESS_VPN_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_ESTABLISHED_MARKER: &str = ".apple-session-established";
 const PAGE_FETCH_FAILURE_MARKER: &str = "__APW_PAGE_FETCH_FAILED__:";
@@ -1445,6 +1450,10 @@ fn plan_nearby_parts(groups: &[Vec<Target>]) -> HashMap<PickupCacheKey, Vec<Stri
 struct RequestGate {
     last_sent: Option<Instant>,
     cycle_request_count: u32,
+    /// 当前这份 Cookie 已经发出的请求数，跨轮次累计。
+    cookie_request_count: u32,
+    /// 当前出口 IP 已经发出的请求数，跨轮次累计。
+    exit_request_count: u32,
 }
 
 impl RequestGate {
@@ -1466,6 +1475,8 @@ impl RequestGate {
             let now = Instant::now();
             self.last_sent = Some(now);
             self.cycle_request_count = self.cycle_request_count.saturating_add(1);
+            self.cookie_request_count = self.cookie_request_count.saturating_add(1);
+            self.exit_request_count = self.exit_request_count.saturating_add(1);
             return;
         }
     }
@@ -1816,16 +1827,25 @@ impl QueryState {
     /// 计数，沿用上一个出口攒下的 Cookie 会把被拒带到新 IP，所以一并清掉；
     /// 首次选定出口时还没有旧出口，不必清。必须在 `set_active` 之前调用。
     async fn reset_session_for_new_exit(&mut self) {
-        let had_exit = self.routes.active().is_some();
+        self.gate.exit_request_count = 0;
+        if self.routes.active().is_some() {
+            self.clear_cookies().await;
+        } else if let Some(session) = self.session.as_mut() {
+            session.locale = None;
+        }
+    }
+
+    /// 清掉浏览器 Cookie，下一次查询会重新打开地区页面拿一份新的。
+    async fn clear_cookies(&mut self) {
+        self.gate.cookie_request_count = 0;
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        if had_exit
-            && let Err(error) = session
-                .command("Network.clearBrowserCookies", json!({}))
-                .await
+        if let Err(error) = session
+            .command("Network.clearBrowserCookies", json!({}))
+            .await
         {
-            eprintln!("换出口后清除 Cookie 失败：{error}");
+            eprintln!("清除 Cookie 失败：{error}");
         }
         session.locale = None;
     }
@@ -1855,10 +1875,20 @@ impl QueryState {
         }
 
         let site = region_site(region);
+        let spent = self.gate.exit_request_count >= EXIT_REQUEST_BUDGET;
         // 切换前先测速：测不通的节点直接跳过并短暂标记，不切过去浪费一次 Apple 请求。
         let chosen = loop {
             let now = Instant::now();
-            let Some(candidate) = self.routes.choose(&site, now).map(str::to_string) else {
+            // 当前出口额度快用完时优先换到别的节点；没有别的可用节点就继续用它，等 541 再处理。
+            let next = if spent {
+                self.routes.next(&site, now)
+            } else {
+                None
+            };
+            let Some(candidate) = next
+                .or_else(|| self.routes.choose(&site, now))
+                .map(str::to_string)
+            else {
                 let remaining = self.routes.wait_for(&site, now).unwrap_or_default();
                 return Err(ApiError::CoolingDown {
                     remaining_seconds: remaining.as_secs()
@@ -1899,6 +1929,12 @@ impl QueryState {
             .select(&group, &chosen)
             .await
             .map_err(|error| ApiError::Transport(format!("切换 Clash 节点失败：{error}")))?;
+        if spent {
+            eprintln!(
+                "当前出口已发 {} 次请求，主动换节点",
+                self.gate.exit_request_count
+            );
+        }
         match clash.close_group_connections(&group).await {
             Ok(closed) => eprintln!("Apple 查询切换到 Clash 节点 {chosen}，断开旧连接 {closed} 条"),
             Err(error) => {
@@ -2037,6 +2073,13 @@ impl QueryState {
         let mut attempts = 0usize;
         loop {
             self.prepare_route(region).await?;
+            if self.gate.cookie_request_count >= COOKIE_REQUEST_BUDGET {
+                eprintln!(
+                    "当前 Cookie 已发 {} 次请求，主动清除后继续用同一出口",
+                    self.gate.cookie_request_count
+                );
+                self.clear_cookies().await;
+            }
             let result = {
                 let QueryState { session, gate, .. } = &mut *self;
                 session
@@ -2136,6 +2179,8 @@ impl QueryState {
             )));
         }
         eprintln!("ExpressVPN 已连接 {location}，查询浏览器改用全新资料");
+        self.gate.cookie_request_count = 0;
+        self.gate.exit_request_count = 0;
         self.vpn_location = Some(location);
         self.route_switches = self.route_switches.saturating_add(1);
         Ok(profile)
@@ -5210,6 +5255,88 @@ mod tests {
                 .routes
                 .is_available("日本01", "www.apple.com.cn", Instant::now())
         );
+    }
+
+    #[tokio::test]
+    async fn cookie额度用完后主动清除并留在同一出口() {
+        let (fetcher, _peer, requests) = cdp_recorded_responses(vec![
+            cookies_cleared_response(),
+            navigate_response(),
+            ready_response(),
+            pickup_response(&["R390"], "MG6X4CH/A", "unavailable"),
+        ])
+        .await;
+        {
+            let mut state = fetcher.state.lock().await;
+            state.gate.cookie_request_count = COOKIE_REQUEST_BUDGET;
+            state.gate.exit_request_count = COOKIE_REQUEST_BUDGET;
+        }
+        let region = region_by_locale("zh_CN").unwrap();
+
+        fetcher.begin_cycle().await;
+        fetcher
+            .pickup_message(region, "R390", &[test_target("MG6X4CH/A")], None)
+            .await
+            .expect("清除 Cookie 后应重新打开地区页面并查到结果");
+        assert_eq!(
+            requests.lock().await[0]["method"],
+            "Network.clearBrowserCookies"
+        );
+        let state = fetcher.state.lock().await;
+        assert_eq!(state.gate.cookie_request_count, 1, "新 Cookie 从零计数");
+        assert_eq!(
+            state.gate.exit_request_count,
+            COOKIE_REQUEST_BUDGET + 1,
+            "同一出口继续累计"
+        );
+    }
+
+    #[tokio::test]
+    async fn 出口额度用完后主动换节点且不冷却旧节点() {
+        let (clash, log) = fake_clash(&["香港01", "日本01"], "香港01").await;
+        let (fetcher, _peer, requests) = cdp_recorded_responses(vec![
+            cookies_cleared_response(),
+            navigate_response(),
+            ready_response(),
+            pickup_response(&["R390"], "MG6X4CH/A", "unavailable"),
+        ])
+        .await;
+        use_clash(&fetcher, clash).await;
+        {
+            let mut state = fetcher.state.lock().await;
+            state
+                .routes
+                .set_routes(vec!["香港01".into(), "日本01".into()]);
+            state.routes.set_active(Some("香港01".into()));
+            state.routes_loaded = true;
+            state.gate.cookie_request_count = COOKIE_REQUEST_BUDGET;
+            state.gate.exit_request_count = EXIT_REQUEST_BUDGET;
+        }
+        let region = region_by_locale("zh_CN").unwrap();
+
+        fetcher
+            .pickup_message(region, "R390", &[test_target("MG6X4CH/A")], None)
+            .await
+            .expect("主动换节点后应查到结果");
+        assert!(
+            log.lock()
+                .await
+                .iter()
+                .any(|entry| entry.starts_with("PUT") && entry.contains("日本01")),
+            "应主动切到下一个节点"
+        );
+        assert_eq!(
+            requests.lock().await[0]["method"],
+            "Network.clearBrowserCookies"
+        );
+        let state = fetcher.state.lock().await;
+        assert_eq!(state.routes.active(), Some("日本01"));
+        assert!(
+            !state.routes.is_resting("香港01", Instant::now()),
+            "主动换走不是被拒，不冷却"
+        );
+        assert_eq!(state.gate.exit_request_count, 1);
+        assert_eq!(state.gate.cookie_request_count, 1);
     }
 
     #[tokio::test]
