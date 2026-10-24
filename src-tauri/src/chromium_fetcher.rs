@@ -1802,16 +1802,32 @@ impl QueryState {
         if let Err(error) = clash.close_group_connections(&group).await {
             eprintln!("手动切换节点后断开旧连接失败：{error}");
         }
+        self.reset_session_for_new_exit().await;
         self.routes.clear_route(node);
         self.routes.set_active(Some(node.to_string()));
         self.consecutive_rejections = 0;
         self.cooling_announced.clear();
         self.route_failure = None;
-        if let Some(session) = self.session.as_mut() {
-            session.locale = None;
-        }
         eprintln!("手动切换到 Clash 节点 {node}");
         Ok(delay)
+    }
+
+    /// 换出口后让浏览器在新 IP 上重新打开地区页面完成校验。Apple 也按 Cookie
+    /// 计数，沿用上一个出口攒下的 Cookie 会把被拒带到新 IP，所以一并清掉；
+    /// 首次选定出口时还没有旧出口，不必清。必须在 `set_active` 之前调用。
+    async fn reset_session_for_new_exit(&mut self) {
+        let had_exit = self.routes.active().is_some();
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if had_exit
+            && let Err(error) = session
+                .command("Network.clearBrowserCookies", json!({}))
+                .await
+        {
+            eprintln!("换出口后清除 Cookie 失败：{error}");
+        }
+        session.locale = None;
     }
 
     /// Clash 模式下，在真实请求前确认出口节点：必要时切换节点、断开旧连接，
@@ -1889,12 +1905,9 @@ impl QueryState {
                 eprintln!("Apple 查询切换到 Clash 节点 {chosen}，但断开旧连接失败：{error}")
             }
         }
+        self.reset_session_for_new_exit().await;
         self.routes.set_active(Some(chosen));
         self.route_switches = self.route_switches.saturating_add(1);
-        if let Some(session) = self.session.as_mut() {
-            // 新出口需要重新打开地区页面，让 Apple 的页面校验在新 IP 上完成。
-            session.locale = None;
-        }
         Ok(())
     }
 
@@ -1918,10 +1931,8 @@ impl QueryState {
             eprintln!("切换到指定节点后断开旧连接失败：{error}");
         }
         eprintln!("Apple 查询使用指定节点 {node}");
+        self.reset_session_for_new_exit().await;
         self.routes.set_active(Some(node));
-        if let Some(session) = self.session.as_mut() {
-            session.locale = None;
-        }
         Ok(())
     }
 
@@ -4968,11 +4979,17 @@ mod tests {
         json!({"result": {"result": {"value": "{\"readyState\":\"complete\"}"}}})
     }
 
+    /// `Network.clearBrowserCookies` 的回复：每次从旧出口换到新出口都会先清 Cookie。
+    fn cookies_cleared_response() -> Value {
+        json!({"result": {}})
+    }
+
     #[tokio::test]
     async fn clash节点被拒后冷却并换下一个节点重试() {
         let (clash, log) = fake_clash(&["香港01", "日本01"], "香港01").await;
-        let (fetcher, _peer) = cdp_responses(vec![
+        let (fetcher, _peer, requests) = cdp_recorded_responses(vec![
             http_response(541),
+            cookies_cleared_response(),
             navigate_response(),
             ready_response(),
             pickup_response(&["R390"], "MG6X4CH/A", "available"),
@@ -4987,6 +5004,11 @@ mod tests {
             .await
             .expect("换节点后应拿到正常响应");
         assert!(result.parts["MG6X4CH/A"].availability.is_in_stock());
+        assert_eq!(
+            requests.lock().await[1]["method"],
+            "Network.clearBrowserCookies",
+            "换到新节点前应清掉旧出口的 Cookie"
+        );
 
         let log = log.lock().await.clone();
         assert!(
@@ -5093,6 +5115,7 @@ mod tests {
         let (clash, log) = fake_clash(&["香港01", "日本01"], "香港01").await;
         let (fetcher, _peer) = cdp_responses(vec![
             json!({"result": {"frameId": "main", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"}}),
+            cookies_cleared_response(),
             navigate_response(),
             ready_response(),
             pickup_response(&["R390"], "MG6X4CH/A", "unavailable"),
@@ -5156,6 +5179,7 @@ mod tests {
             fake_clash_with_dead(&["香港01", "日本01", "新加坡01"], "香港01", &["日本01"]).await;
         let (fetcher, _peer) = cdp_responses(vec![
             http_response(541),
+            cookies_cleared_response(),
             navigate_response(),
             ready_response(),
             pickup_response(&["R390"], "MG6X4CH/A", "unavailable"),
@@ -5229,6 +5253,7 @@ mod tests {
         let (mut clash, log) = fake_clash(&["香港01", "日本01"], "香港01").await;
         clash.pinned_node = "日本01".into();
         let (fetcher, _peer) = cdp_responses(vec![
+            cookies_cleared_response(),
             navigate_response(),
             ready_response(),
             http_response(541),
@@ -5472,9 +5497,11 @@ mod tests {
         let (clash, _log) = fake_clash(&["香港01", "日本01", "新加坡01"], "香港01").await;
         let (fetcher, _peer) = cdp_responses(vec![
             http_response(541),
+            cookies_cleared_response(),
             navigate_response(),
             ready_response(),
             http_response(541),
+            cookies_cleared_response(),
             navigate_response(),
             ready_response(),
             pickup_response(&["R390"], "MG6X4CH/A", "unavailable"),
